@@ -25,21 +25,29 @@ from discord.ext import commands
 
 from .challenge import Challenge
 from .config import (
+    AGENT_PROVIDER,
     ALERT_MODE,
     ALERT_USER_ID,
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_BASE_URL,
     CATEGORY_LANE,
     CHURN_MODEL,
+    CLAUDE_MAX_TOKENS,
+    CLAUDE_MODEL,
+    CODEX_MODEL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DOWNLOAD_DIR,
     IGNORE_CHANNELS,
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
     STATUS_CHANNEL,
     WORKER_KIND,
     category_for_channel,
 )
 from .dispatcher import Dispatcher
 from .lanes import LANES
-from .models import DeepSeekClient
+from .models import ClaudeClient, CodexClient, DeepSeekClient
 from .registry import Registry
 
 # .env is loaded by config.py (imported above) before its env reads.
@@ -47,14 +55,30 @@ from .registry import Registry
 registry = Registry()
 dispatcher = Dispatcher(registry)
 
-# Build the model client once if we're in agent mode and a key is present;
-# otherwise fall back to dummy workers (scripted, no key/cost).
-_model = None
-if WORKER_KIND == "agent":
-    if DEEPSEEK_API_KEY:
-        _model = DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL)
-    else:
-        print("WORKER_KIND=agent but DEEPSEEK_API_KEY is empty -> using dummy workers")
+# Build the model client once if we're in agent mode and the selected provider's
+# key is present; otherwise fall back to dummy workers (scripted, no key/cost).
+def _build_model():
+    if AGENT_PROVIDER == "claude":
+        if not ANTHROPIC_API_KEY:
+            print("CDDC_PROVIDER=claude but ANTHROPIC_API_KEY is empty -> using dummy workers")
+            return None
+        return ClaudeClient(
+            ANTHROPIC_API_KEY, CLAUDE_MODEL,
+            base_url=ANTHROPIC_BASE_URL or None, max_tokens=CLAUDE_MAX_TOKENS,
+        )
+    if AGENT_PROVIDER == "codex":
+        if not OPENAI_API_KEY:
+            print("CDDC_PROVIDER=codex but OPENAI_API_KEY is empty -> using dummy workers")
+            return None
+        return CodexClient(OPENAI_API_KEY, CODEX_MODEL, base_url=OPENAI_BASE_URL)
+    # default: deepseek
+    if not DEEPSEEK_API_KEY:
+        print("CDDC_PROVIDER=deepseek but DEEPSEEK_API_KEY is empty -> using dummy workers")
+        return None
+    return DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL)
+
+
+_model = _build_model() if WORKER_KIND == "agent" else None
 
 intents = discord.Intents.default()
 intents.message_content = True  # PRIVILEGED - enable it in the Developer Portal

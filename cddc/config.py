@@ -79,13 +79,29 @@ def _envs(name: str, default: str) -> str:
     return os.environ.get(name, default).split("#")[0].strip()
 
 
-# --- real agent (DeepSeek, OpenAI-compatible) ------------------------------
-# Worker kind: "dummy" (scripted, no key/cost) | "agent" (real DeepSeek loop).
+# --- real agent (pluggable provider) ---------------------------------------
+# Worker kind: "dummy" (scripted, no key/cost) | "agent" (real LLM loop).
 WORKER_KIND = _envs("CDDC_WORKER", "dummy").lower()
+# Provider for the real loop: "deepseek" | "claude" | "codex". bot.py builds the
+# matching client and falls back to dummy workers if its key is missing.
+AGENT_PROVIDER = _envs("CDDC_PROVIDER", "deepseek").lower()
+
+# DeepSeek (OpenAI-compatible).
 DEEPSEEK_API_KEY = _envs("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = _envs("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # deepseek-chat = v4-flash non-thinking (cheapest churn). Override per taste.
 CHURN_MODEL = _envs("CDDC_CHURN_MODEL", "deepseek-chat")
+
+# Claude (Anthropic Messages API).
+ANTHROPIC_API_KEY = _envs("ANTHROPIC_API_KEY", "")
+ANTHROPIC_BASE_URL = _envs("ANTHROPIC_BASE_URL", "")  # empty -> SDK default
+CLAUDE_MODEL = _envs("CDDC_CLAUDE_MODEL", "claude-opus-4-8")
+CLAUDE_MAX_TOKENS = int(_envs("CDDC_CLAUDE_MAX_TOKENS", "8000"))
+
+# Codex (OpenAI, OpenAI-compatible).
+OPENAI_API_KEY = _envs("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = _envs("OPENAI_BASE_URL", "https://api.openai.com/v1")
+CODEX_MODEL = _envs("CDDC_CODEX_MODEL", "gpt-5-codex")
 # Hard caps so a runaway loop can't burn money.
 AGENT_MAX_STEPS = int(_envs("CDDC_AGENT_MAX_STEPS", "40"))
 AGENT_MAX_TOKENS = int(_envs("CDDC_AGENT_MAX_TOKENS", "200000"))

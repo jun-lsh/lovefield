@@ -1,5 +1,7 @@
 # Phase 1 + first real agent. Pinned majors; let patches float.
 discord.py>=2.3,<3
 python-dotenv>=1.0,<2
-# DeepSeek is OpenAI-compatible; we use this SDK pointed at api.deepseek.com.
+# DeepSeek + OpenAI/Codex are OpenAI-compatible; we use this SDK for both.
 openai>=1.40,<2
+# Claude provider uses the Anthropic SDK (only needed for CDDC_PROVIDER=claude).
+anthropic>=0.40

@@ -84,10 +84,11 @@ class Sandbox:
 
     async def teardown(self) -> None:
         """Force-remove the container. Best-effort; swallow everything."""
-        try:
-            await self._docker("rm", "-f", self.name)
-        except Exception:
-            pass
+        # TODO: save solve script and important files before tearing down
+        # try:
+        #     await self._docker("rm", "-f", self.name)
+        # except Exception:
+        #     pass
         self._started = False
 
     async def _docker(self, *args: str, timeout: int | None = None) -> tuple[int, str]:
