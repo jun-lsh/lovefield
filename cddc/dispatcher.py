@@ -80,6 +80,11 @@ class Dispatcher:
                 from .sandbox import Sandbox
 
                 sandbox = Sandbox(config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir)
+            # Role drives which skills/roles/<role>.md doctrine loads. Thin-
+            # triage-always by default; a specialist-mode lane (deep_solver,
+            # windows) gets the deep-solver doctrine instead. Escalation / !lane
+            # onto such a lane flips the role for free.
+            role = "specialist" if lane.default_mode == "specialist" else "triage"
             worker: Worker = AgentWorker(
                 lane,
                 chall,
@@ -95,6 +100,8 @@ class Dispatcher:
                 max_steps=config.AGENT_MAX_STEPS,
                 max_tokens=config.AGENT_MAX_TOKENS,
                 shell_timeout=config.SHELL_TIMEOUT,
+                checkpoint_every=config.AGENT_CHECKPOINT,
+                role=role,
             )
         else:
             worker = DummyWorker(

@@ -245,6 +245,100 @@ async def cmd_status(ctx: commands.Context) -> None:
         await ctx.send(chunk)
 
 
+@bot.command(name="trace")
+async def cmd_trace(ctx: commands.Context, target: str | None = None) -> None:
+    """Dump a worker's full message+tool trace to a file and upload it."""
+    workers = registry.workers(ctx.channel.id)
+    if not workers:
+        await ctx.send("no worker here")
+        return
+    target = _clean_target(target)
+    dest = pathlib.Path(DOWNLOAD_DIR) / str(ctx.channel.id)
+    dest.mkdir(parents=True, exist_ok=True)
+    sent = 0
+    for w in workers:
+        if target and w.name != target:
+            continue
+        text = w.trace_text()
+        path = dest / f"trace_{w.name}.txt"
+        path.write_text(text, encoding="utf-8")
+        await ctx.send(
+            f"trace for **{w.name}** ({len(text)} chars)",
+            file=discord.File(str(path)),
+        )
+        sent += 1
+    if not sent:
+        await ctx.send(f"no worker named `{target}` here")
+
+
+@bot.command(name="files")
+async def cmd_files(ctx: commands.Context, *, arg: str = "") -> None:
+    """Files in this thread's agent workdir (_files/<id>/).
+
+      !files              - list AND upload all
+      !files list         - list only (no upload)
+      !files a.txt, b.bin - upload just those, by name
+    """
+    dest = pathlib.Path(DOWNLOAD_DIR) / str(ctx.channel.id)
+    paths = sorted(p for p in dest.iterdir() if p.is_file()) if dest.exists() else []
+    if not paths:
+        await ctx.send("no files in this thread's workdir yet")
+        return
+
+    arg = arg.strip()
+    limit = 24 * 1024 * 1024  # stay under Discord's upload cap
+
+    # --- list only ---
+    if arg.lower() == "list":
+        lines = [f"**files in workdir** ({len(paths)}):"]
+        lines += [f"  - `{p.name}` ({p.stat().st_size} B)" for p in paths]
+        for chunk in _chunk("\n".join(lines), 1990):
+            await ctx.send(chunk)
+        return
+
+    # --- pull by name ---
+    if arg:
+        wanted = [n.strip() for n in arg.replace(",", " ").split() if n.strip()]
+        by_name = {p.name: p for p in paths}
+        sendable, missing, toobig = [], [], []
+        for n in wanted:
+            p = by_name.get(n)
+            if p is None:
+                missing.append(n)
+            elif p.stat().st_size > limit:
+                toobig.append(n)
+            else:
+                sendable.append(p)
+        if sendable:
+            await ctx.send(files=[discord.File(str(p)) for p in sendable[:10]])
+        notes = []
+        if missing:
+            notes.append("not found: " + ", ".join(missing))
+        if toobig:
+            notes.append("too big: " + ", ".join(toobig))
+        if len(sendable) > 10:
+            notes.append(f"capped at 10 (you asked for {len(sendable)})")
+        if notes:
+            await ctx.send(" | ".join(notes))
+        return
+
+    # --- default: list AND upload all ---
+    lines = [f"**files in workdir** ({len(paths)}):"]
+    sendable, skipped = [], []
+    for p in paths:
+        lines.append(f"  - `{p.name}` ({p.stat().st_size} B)")
+        if p.stat().st_size <= limit and len(sendable) < 10:
+            sendable.append(p)
+        else:
+            skipped.append(p.name)
+    for chunk in _chunk("\n".join(lines), 1990):
+        await ctx.send(chunk)
+    if sendable:
+        await ctx.send(files=[discord.File(str(p)) for p in sendable])
+    if skipped:
+        await ctx.send("not uploaded (too big or >10 cap): " + ", ".join(skipped))
+
+
 @bot.command(name="steer")
 async def cmd_steer(ctx: commands.Context, *, text: str = "") -> None:
     target, text = _parse_target(text)
@@ -411,6 +505,9 @@ async def cmd_help(ctx: commands.Context) -> None:
         "**CDDC bot commands** (run inside a challenge thread):",
         "`!start <desc>` + attachments - begin a challenge here (downloads files)",
         "`!status` - snapshot every agent on this thread",
+        "`!trace [@name]` - dump an agent's full message+tool trace as a file",
+        "`!files` - list+upload agent files (`!files list` = list only; "
+        "`!files a.txt, b.bin` = pull those by name)",
         "`!steer <text>` - nudge the agent(s); the ONLY way to reach them "
         "(`!steer @name ...` targets one). plain chat is ignored.",
         "`!race` - escalate to racing / confirm a held race-ask",

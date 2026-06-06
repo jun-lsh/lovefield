@@ -53,6 +53,28 @@ def tool_specs() -> list[dict]:
             {"flag": {"type": "string"}},
             ["flag"],
         ),
+        _spec(
+            "request_escalation",
+            "Escalate this challenge to a specialist when it is beyond a cheap "
+            "triage solve (too hard, or it needs tooling/knowledge you lack). "
+            "Halts you for an operator decision - prefer this over grinding a "
+            "hard challenge. Give your honest difficulty read and the reason.",
+            {
+                "difficulty": {
+                    "type": "integer",
+                    "description": "1 (trivial) to 5 (very hard)",
+                },
+                "technique": {
+                    "type": "string",
+                    "description": "named attack/challenge class, e.g. 'RSA/Franklin-Reiter'",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "one line: why a specialist is needed (what's blocking you)",
+                },
+            },
+            ["difficulty", "technique", "reason"],
+        ),
     ]
 
 

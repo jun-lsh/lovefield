@@ -90,6 +90,8 @@ CHURN_MODEL = _envs("CDDC_CHURN_MODEL", "deepseek-chat")
 AGENT_MAX_STEPS = int(_envs("CDDC_AGENT_MAX_STEPS", "40"))
 AGENT_MAX_TOKENS = int(_envs("CDDC_AGENT_MAX_TOKENS", "200000"))
 SHELL_TIMEOUT = int(_envs("CDDC_SHELL_TIMEOUT", "30"))
+# Agent posts a consolidated checkpoint rollup every N steps (0 disables).
+AGENT_CHECKPOINT = int(_envs("CDDC_AGENT_CHECKPOINT", "8"))
 
 # Where run_shell executes: "local" (host, no isolation) | "docker" (per-challenge
 # ctf-sandbox container, workdir bind-mounted). Crypto/web/research keep working

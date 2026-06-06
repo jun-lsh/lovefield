@@ -12,6 +12,7 @@ Discord-agnostic: talks to a Channel and a ModelClient, nothing else.
 from __future__ import annotations
 
 import os
+import pathlib
 
 from .challenge import Challenge
 from .channel import Channel
@@ -20,16 +21,45 @@ from .models import ModelClient, Reply, assistant_message
 from .tools import Toolbox, tool_specs
 from .worker import Worker, summary
 
-SYSTEM = """You are an autonomous CTF-solving agent on the {lane} lane for CDDC 2026.
+# Per-agent alignment lives in markdown, NOT here - teammates edit cddc/skills/
+# without touching Python. The system prompt is STACKED from four parts so the
+# triage "move fast" bias never poisons a specialist (see skills/README.md):
+#   common.md + env.md + roles/<role>.md + lanes/<lane>.md
+SKILLS_DIR = pathlib.Path(__file__).parent / "skills"
 
-Doctrine:
-- Bias to action: try the cheapest plausible approach immediately, observe, adjust. Short loops, no long silent planning.
-- Use your tools. run_shell runs in the challenge workdir and python is available. read_file/write_file/fetch_url as needed.
-- Narrate concisely in between tool calls - an operator is watching the thread and may steer you.
-- Verify before you submit. When you are confident you have the flag, call submit_flag exactly once. Never submit a guess.
-- If you stall (a few tries with no traction), say so plainly - the operator can redirect you.
+# Fallback only (used if cddc/skills/ is somehow missing entirely).
+SYSTEM_FALLBACK = """You are a {role} CTF agent for CDDC 2026 on the {lane} lane.
+Recon first (list files, read them, classify the challenge), try the cheapest
+win, and if you stall STOP and say so plainly. Use your tools. Verify before
+submit_flag; never guess. Flags look like CDDC{{...}}."""
 
-Flags are usually formatted CDDC{{...}} unless the challenge states otherwise."""
+
+def _read(path: pathlib.Path) -> str | None:
+    return path.read_text(encoding="utf-8").strip() if path.exists() else None
+
+
+def load_system(lane_name: str, role: str = "triage") -> str:
+    """Compose the system prompt by stacking the skills/ markdown layers.
+
+    common + env (universal/neutral) + role doctrine + lane playbook. Each
+    layer is optional and degrades gracefully; if NONE are present we fall back
+    to a minimal built-in string so the loop never breaks.
+    """
+    layers = [
+        (_read(SKILLS_DIR / "common.md"), None),
+        (_read(SKILLS_DIR / "env.md"), None),
+        (_read(SKILLS_DIR / "roles" / f"{role}.md"), None),
+        (_read(SKILLS_DIR / "lanes" / f"{lane_name}.md"), f"# Lane playbook: {lane_name}"),
+    ]
+    parts: list[str] = []
+    for body, header in layers:
+        if body is None:
+            continue
+        parts.append(f"---\n{header}\n\n{body}" if header else body)
+    if not parts:
+        return SYSTEM_FALLBACK.format(lane=lane_name, role=role)
+    parts.append(f"---\nYou are the **{role}** agent on the **{lane_name}** lane.")
+    return "\n\n".join(parts)
 
 
 def _specs_for_lane(lane: Lane) -> list[dict]:
@@ -48,10 +78,12 @@ def _specs_for_lane(lane: Lane) -> list[dict]:
 
 
 def _brief(args: dict) -> str:
+    # Show enough to see what actually ran (commands especially). The channel
+    # splits long posts into multiple messages, so we don't hard-truncate here.
     parts = []
     for k, v in args.items():
         s = str(v).replace("\n", " ")
-        parts.append(f"{k}={s[:60]}")
+        parts.append(f"{k}={s[:300]}")
     return "(" + ", ".join(parts) + ")"
 
 
@@ -73,30 +105,37 @@ class AgentWorker(Worker):
         max_steps: int,
         max_tokens: int,
         shell_timeout: int = 30,
+        checkpoint_every: int = 8,
+        role: str = "triage",
     ) -> None:
         super().__init__(
             lane, chall, channel,
             id=id, name=name, location=location, operator=operator,
             on_candidate=on_candidate,
         )
+        self.role = role
         self.model = model
         self.sandbox = sandbox
         self.toolbox = Toolbox(workdir, shell_timeout, sandbox=sandbox)
         self.max_steps = max_steps
         self.max_tokens = max_tokens
+        self.checkpoint_every = checkpoint_every
         self._tokens = 0
+        # The live OpenAI-format message log - exposed so !trace can dump it.
+        self.messages: list[dict] = []
 
     def status(self) -> dict:
         s = super().status()
         s["tokens"] = self._tokens
         s["model"] = getattr(self.model, "model", "?")
+        s["role"] = self.role
         return s
 
     async def run(self) -> None:
         self.chall.state = "solving"
         await self._post(
-            f"[start] **{self.name}** ({self.location}) agent on `{self.lane.name}` "
-            f"- model {getattr(self.model, 'model', '?')}"
+            f"[start] **{self.name}** ({self.location}) {self.role} agent on "
+            f"`{self.lane.name}` - model {getattr(self.model, 'model', '?')}"
         )
         if self.sandbox is not None:
             try:
@@ -114,8 +153,11 @@ class AgentWorker(Worker):
 
     async def _run_loop(self) -> None:
         files = ", ".join(os.path.basename(f) for f in self.chall.files) or "(none)"
-        messages: list[dict] = [
-            {"role": "system", "content": SYSTEM.format(lane=self.lane.name)},
+        # self.messages is the live log (mutated in place below) so !trace can
+        # read it mid-run; `messages` is just a local alias to keep run() tidy.
+        messages = self.messages
+        messages.extend([
+            {"role": "system", "content": load_system(self.lane.name, self.role)},
             {
                 "role": "user",
                 "content": (
@@ -123,7 +165,7 @@ class AgentWorker(Worker):
                     f"Files in your workdir: {files}\n\nDescription:\n{self.chall.description}"
                 ),
             },
-        ]
+        ])
         specs = _specs_for_lane(self.lane)
         budget_bonus = 0
 
@@ -171,8 +213,17 @@ class AgentWorker(Worker):
             messages.append(assistant_message(reply))
 
             if reply.content.strip():
-                self.findings.append(reply.content.strip()[:200])
-                await self._post(f"[{self.current_step}] {reply.content.strip()[:1500]}")
+                text = reply.content.strip()
+                self.findings.append(text[:200])
+                # No hard truncation - DiscordChannel splits long posts into
+                # multiple messages. Cap only to bound a pathological dump.
+                await self._post(f"[{self.current_step}] {text[:8000]}")
+
+            # Periodic checkpoint: a consolidated rollup so the operator gets
+            # signal, not just per-step noise. Template-only (no extra model
+            # call / cost). 0 disables.
+            if self.checkpoint_every and self.current_step % self.checkpoint_every == 0:
+                await self._post(self._checkpoint(cap))
 
             if not reply.tool_calls:
                 messages.append({
@@ -208,6 +259,45 @@ class AgentWorker(Worker):
                     "role": "user",
                     "content": "The operator rejected that flag. Re-examine and try again.",
                 })
+
+    def _checkpoint(self, cap: int) -> str:
+        """Consolidated 'what's come out so far' rollup (no model call)."""
+        actions = [t for t in self.tried if not t.startswith("steer:")]
+        steers = [t[len("steer:"):] for t in self.tried if t.startswith("steer:")]
+        lines = [
+            f"[checkpoint] **{self.name}** step {self.current_step}/{cap} "
+            f"- {self._tokens} tok",
+            "  recent actions: " + (" | ".join(actions[-5:]) or "-"),
+            "  latest findings: "
+            + (" | ".join(f[:140] for f in self.findings[-3:]) or "-"),
+        ]
+        if steers:
+            lines.append("  steers folded in: " + " | ".join(steers[-3:]))
+        return "\n".join(lines)
+
+    def trace_text(self) -> str:
+        """Full message+tool trace - what `!trace` dumps to a file."""
+        head = super().trace_text()
+        out = [
+            head,
+            "",
+            f"=== full message log ({len(self.messages)} msgs, "
+            f"{self._tokens} tok) ===",
+        ]
+        for m in self.messages:
+            role = m.get("role", "?")
+            content = m.get("content") or ""
+            if role == "assistant":
+                if content:
+                    out.append(f"[assistant] {content}")
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function", {})
+                    out.append(f"  -> call {fn.get('name')}({fn.get('arguments')})")
+            elif role == "tool":
+                out.append(f"[tool result] {content}")
+            else:
+                out.append(f"[{role}] {content}")
+        return "\n".join(out)
 
     async def _chat(self, messages: list[dict], specs: list[dict]) -> Reply | None:
         """Call the model, retry once, then halt for a human on repeated failure."""
