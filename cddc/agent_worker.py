@@ -49,7 +49,7 @@ def load_system(lane_name: str, role: str = "triage") -> str:
         (_read(SKILLS_DIR / "common.md"), None),
         (_read(SKILLS_DIR / "env.md"), None),
         (_read(SKILLS_DIR / "roles" / f"{role}.md"), None),
-        (_read(SKILLS_DIR / "lanes" / f"{lane_name}.md"), f"# Lane playbook: {lane_name}"),
+        (_read(SKILLS_DIR / "lanes" / f"ctf-{lane_name}" / "SKILL.md"), f"# Lane playbook: {lane_name}"),
     ]
     parts: list[str] = []
     for body, header in layers:
@@ -116,7 +116,7 @@ class AgentWorker(Worker):
         self.role = role
         self.model = model
         self.sandbox = sandbox
-        self.toolbox = Toolbox(workdir, shell_timeout, sandbox=sandbox)
+        self.toolbox = Toolbox(workdir, shell_timeout, skills_dir=str(SKILLS_DIR))
         self.max_steps = max_steps
         self.max_tokens = max_tokens
         self.checkpoint_every = checkpoint_every

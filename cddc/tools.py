@@ -11,7 +11,6 @@ Discord-agnostic; stdlib only.
 from __future__ import annotations
 
 import asyncio
-import os
 import pathlib
 
 MAX_OUTPUT = 4000  # chars of tool output fed back to the model
@@ -45,6 +44,30 @@ def tool_specs() -> list[dict]:
             "(no search engine).",
             {"url": {"type": "string"}},
             ["url"],
+        ),
+        _spec(
+            "list_skill_docs",
+            "List available markdown skill docs under cddc/skills. Use this "
+            "to discover lane references before reading a specific doc.",
+            {
+                "path": {
+                    "type": "string",
+                    "description": "Optional subdirectory under cddc/skills, e.g. lanes/ctf-pwn",
+                }
+            },
+            [],
+        ),
+        _spec(
+            "read_skill_doc",
+            "Read a markdown skill doc from cddc/skills. Read only the docs "
+            "that are relevant to the current challenge.",
+            {
+                "path": {
+                    "type": "string",
+                    "description": "Path under cddc/skills, e.g. lanes/ctf-pwn/SKILL.md",
+                }
+            },
+            ["path"],
         ),
         _spec(
             "submit_flag",
@@ -97,11 +120,12 @@ class Toolbox:
     otherwise run_shell runs on the host with no isolation.
     """
 
-    def __init__(self, workdir: str, shell_timeout: int = 30, *, sandbox=None) -> None:
+    def __init__(self, workdir: str, shell_timeout: int = 30, *, sandbox=None, skills_dir: str | None = None,) -> None:
         self.workdir = pathlib.Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.shell_timeout = shell_timeout
         self.sandbox = sandbox
+        self.skills_dir = pathlib.Path(skills_dir).resolve() if skills_dir else None
 
     async def run(self, name: str, args: dict) -> str:
         try:
@@ -113,6 +137,10 @@ class Toolbox:
                 return self._write(str(args.get("path", "")), str(args.get("content", "")))
             if name == "fetch_url":
                 return await self._fetch(str(args.get("url", "")))
+            if name == "list_skill_docs":
+                return self._list_skill_docs(str(args.get("path", "")))
+            if name == "read_skill_doc":
+                return self._read_skill_doc(str(args.get("path", "")))
             return f"unknown tool: {name}"
         except Exception as e:  # tools must never crash the agent loop
             return f"tool error: {e!r}"
@@ -122,6 +150,15 @@ class Toolbox:
         root = self.workdir.resolve()
         if root != p and root not in p.parents:
             raise ValueError(f"path escapes workdir: {path}")
+        return p
+
+    def _safe_skill(self, path: str) -> pathlib.Path:
+        if self.skills_dir is None:
+            raise ValueError("skills dir not configured")
+        p = (self.skills_dir / path).resolve()
+        root = self.skills_dir
+        if root != p and root not in p.parents:
+            raise ValueError(f"path escapes skills dir: {path}")
         return p
 
     async def _shell(self, command: str) -> str:
@@ -153,6 +190,32 @@ class Toolbox:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         return f"wrote {len(content)} chars to {path}"
+
+    def _list_skill_docs(self, path: str = "") -> str:
+        root = self._safe_skill(path)
+        if not root.exists():
+            return f"no such skill path: {path}"
+        if root.is_file():
+            if root.suffix.lower() != ".md":
+                return f"not a markdown skill doc: {path}"
+            return root.relative_to(self.skills_dir).as_posix()
+
+        docs = sorted(
+            p.relative_to(self.skills_dir).as_posix()
+            for p in root.rglob("*.md")
+            if p.is_file()
+        )
+        return "\n".join(docs) or "(no markdown skill docs)"
+
+    def _read_skill_doc(self, path: str) -> str:
+        p = self._safe_skill(path)
+        if not p.exists():
+            return f"no such skill doc: {path}"
+        if not p.is_file():
+            return f"not a file: {path}"
+        if p.suffix.lower() != ".md":
+            return f"not a markdown skill doc: {path}"
+        return _truncate(p.read_text("utf-8", "replace"))
 
     async def _fetch(self, url: str) -> str:
         import urllib.request

@@ -342,6 +342,25 @@ async def scenario_prompts() -> None:
     ok("specialist NOT poisoned by triage 'move fast' doctrine")
 
 
+# --- scenario 7: skill docs are readable, but only through the skill root ---
+async def scenario_skill_tools() -> None:
+    print("scenario: skill-library tools")
+    toolbox = Toolbox(
+        os.path.join("_files", "simskills"),
+        skills_dir=os.path.join("cddc", "skills"),
+    )
+
+    docs = await toolbox.run("list_skill_docs", {"path": "lanes/ctf-crypto"})
+    assert "lanes/ctf-crypto/SKILL.md" in docs, "crypto skill docs not listed"
+
+    body = await toolbox.run("read_skill_doc", {"path": "lanes/ctf-crypto/SKILL.md"})
+    assert "rsa" in body.lower(), "crypto skill doc not readable"
+
+    escaped = await toolbox.run("read_skill_doc", {"path": "../README.md"})
+    assert "path escapes skills dir" in escaped, "skill reader allowed path escape"
+    ok("agents can list/read skill docs without escaping cddc/skills")
+
+
 async def main() -> None:
     await scenario_routing()
     print()
@@ -358,6 +377,8 @@ async def main() -> None:
     await scenario_sandbox_agent()
     print()
     await scenario_prompts()
+    print()
+    await scenario_skill_tools()
     print("\nALL CHECKS PASSED [done]  (no Discord token, no model key, no cost)")
 
 
