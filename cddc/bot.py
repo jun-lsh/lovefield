@@ -32,6 +32,7 @@ from .config import (
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DOWNLOAD_DIR,
+    ESCALATION_BUDGET_MULT,
     IGNORE_CHANNELS,
     STATUS_CHANNEL,
     WORKER_KIND,
@@ -99,10 +100,11 @@ class DiscordChannel:
 
     @staticmethod
     def _severity(content: str) -> str | None:
-        """'big' for candidate-flag / needs-human, 'halt' for the race-ask."""
+        """'big' for candidate-flag / needs-human, 'halt' for a decision-ask."""
         if ("CANDIDATE FLAG" in content) or ("NEEDS HUMAN" in content):
             return "big"
-        if "[ask]" in content:  # any worker question = a halt awaiting a human
+        # any worker question / escalation = a halt awaiting a human decision
+        if ("[ask]" in content) or ("ESCALATION REQUEST" in content):
             return "halt"
         return None
 
@@ -141,6 +143,8 @@ class DiscordChannel:
             kind = "CANDIDATE FLAG"
         elif "NEEDS HUMAN" in content:
             kind = "NEEDS HUMAN"
+        elif "ESCALATION REQUEST" in content:
+            kind = "ESCALATION"
         else:
             kind = "DECISION NEEDED"
         prefix, allowed = _alert(sev)
@@ -410,6 +414,76 @@ async def cmd_lane(ctx: commands.Context, name: str = "") -> None:
     await ctx.send(f"rerouted to lane `{name}` - {worker.name}")
 
 
+@bot.command(name="escalate")
+async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
+    """Approve a pending escalation: stand the triage agent down and respawn a
+    specialist (deeper budget), seeded with triage's handoff.
+
+      !escalate            - specialist on the SAME lane
+      !escalate deep       - hand it to the deep_solver lane
+      !escalate race [n]   - fan out N specialists on the same lane (default 3)
+    """
+    workers = registry.workers(ctx.channel.id)
+    if not workers:
+        await ctx.send("no worker here to escalate")
+        return
+
+    parts = arg.split()
+    mode = parts[0].lower() if parts else ""
+    lane_override: str | None = None
+    n = 1
+    if mode == "deep":
+        lane_override = "deep_solver"
+    elif mode == "race":
+        n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3
+        n = max(2, min(n, 5))
+    elif mode:
+        await ctx.send("usage: !escalate | !escalate deep | !escalate race [n]")
+        return
+
+    # Carry triage's read + recent attempts forward as a handoff steer, then
+    # stand the current worker(s) down and respawn specialist(s) on a fresh
+    # Challenge copy (so the cancelled workers can't clobber the new state).
+    old = workers[0]
+    ch = old.chall
+    handoff = (
+        f"[triage handoff] difficulty {ch.difficulty}/5, "
+        f"technique: {ch.technique or '?'}. {ch.escalation_reason or ''} "
+        f"triage tried: {', '.join(old.tried[-6:]) or '-'}"
+    )
+    channel = ch.channel
+    for w in workers:
+        w.cancel()
+        registry.remove(ctx.channel.id, w)
+
+    kind = "agent" if _model is not None else "dummy"
+    spawned = []
+    for _ in range(n):
+        new_chall = dataclasses.replace(ch, state="dispatched", steers=list(ch.steers))
+        worker = await dispatcher.dispatch(
+            new_chall, channel,
+            lane_override=lane_override,
+            on_candidate=_candidate_hook,
+            kind=kind, model=_model,
+            role_override="specialist",
+            budget_mult=ESCALATION_BUDGET_MULT,
+        )
+        worker.steer(handoff)
+        if n > 1:
+            worker.race_now()
+        spawned.append(worker.name)
+
+    label = (
+        "deep_solver" if lane_override
+        else f"{n}-way race" if n > 1
+        else "specialist"
+    )
+    await ctx.send(
+        f"escalated -> **{label}**: {', '.join(spawned)} "
+        f"(handed off: difficulty {ch.difficulty}/5, {ch.technique or '?'})"
+    )
+
+
 @bot.command(name="start", aliases=["dispatch"])
 async def cmd_start(ctx: commands.Context, *, description: str = "") -> None:
     """!start <description>  (+ attach the distribution files).
@@ -486,17 +560,24 @@ async def cmd_solved(ctx: commands.Context) -> None:
         )
 
 
-@bot.command(name="continue")
+@bot.command(name="continue", aliases=["deny"])
 async def cmd_continue(ctx: commands.Context, *, reason: str = "") -> None:
-    """Reject a pending candidate flag: fold the reason in and re-open."""
+    """Reject + re-open: `!continue <why>` rejects a candidate flag, `!deny`
+    refuses an escalation. Both fold the note in and resume the worker(s)."""
     workers = registry.workers(ctx.channel.id)
     if not workers:
         await ctx.send("no worker here")
         return
-    note = reason or "operator: candidate rejected, keep going"
+    denying = ctx.invoked_with == "deny"
+    default = (
+        "operator: escalation denied, keep going as triage" if denying
+        else "operator: candidate rejected, keep going"
+    )
+    note = reason or default
     for w in workers:
         w.continue_with(note)
-    await ctx.send(f"re-opened - {len(workers)} agent(s) resuming. folded in: {note}")
+    verb = "escalation denied" if denying else "re-opened"
+    await ctx.send(f"{verb} - {len(workers)} agent(s) resuming. folded in: {note}")
 
 
 @bot.command(name="help")
@@ -519,6 +600,12 @@ async def cmd_help(ctx: commands.Context) -> None:
         "**when a candidate flag is found** the thread halts for validation:",
         "`!solved` - confirm it; renames thread to [SOLVED], agents stand down",
         "`!continue <why it's wrong>` - reject it; reason is folded in, agents re-open",
+        "",
+        "**when an agent asks to escalate** (it hit something too hard):",
+        "`!escalate` - respawn a specialist on the same lane (deeper budget)",
+        "`!escalate deep` - hand it to the deep_solver lane",
+        "`!escalate race [n]` - fan out N specialists (default 3)",
+        "`!deny` - refuse; the agent keeps going as triage",
         "",
         f"lanes: {', '.join(sorted(LANES))}",
     ]

@@ -92,6 +92,9 @@ AGENT_MAX_TOKENS = int(_envs("CDDC_AGENT_MAX_TOKENS", "200000"))
 SHELL_TIMEOUT = int(_envs("CDDC_SHELL_TIMEOUT", "30"))
 # Agent posts a consolidated checkpoint rollup every N steps (0 disables).
 AGENT_CHECKPOINT = int(_envs("CDDC_AGENT_CHECKPOINT", "8"))
+# When triage escalates, the respawned specialist gets this multiple of the
+# base step budget (a specialist is meant to grind, not triage).
+ESCALATION_BUDGET_MULT = float(_envs("CDDC_ESCALATION_BUDGET_MULT", "3"))
 
 # Where run_shell executes: "local" (host, no isolation) | "docker" (per-challenge
 # ctf-sandbox container, workdir bind-mounted). Crypto/web/research keep working

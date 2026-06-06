@@ -62,28 +62,45 @@ def load_system(lane_name: str, role: str = "triage") -> str:
     return "\n\n".join(parts)
 
 
+# Tools always offered regardless of a lane's allowlist - they're handled in
+# the agent (not the Toolbox), so every agent can submit a flag or escalate.
+_ALWAYS_TOOLS = {"submit_flag", "request_escalation"}
+
+
 def _specs_for_lane(lane: Lane) -> list[dict]:
     """Filter tool_specs() to the lane's allowed set.
 
     An empty `lane.tools` means "offer all" (back-compat for `raw` / unset lanes).
-    `submit_flag` is always offered - it is handled in the agent, not the toolbox.
+    `submit_flag` / `request_escalation` are always offered.
     """
     specs = tool_specs()
     if not lane.tools:
         return specs
     return [
         s for s in specs
-        if s["function"]["name"] in lane.tools or s["function"]["name"] == "submit_flag"
+        if s["function"]["name"] in lane.tools or s["function"]["name"] in _ALWAYS_TOOLS
     ]
 
 
-def _brief(args: dict) -> str:
-    # Show enough to see what actually ran (commands especially). The channel
-    # splits long posts into multiple messages, so we don't hard-truncate here.
-    parts = []
-    for k, v in args.items():
-        s = str(v).replace("\n", " ")
-        parts.append(f"{k}={s[:300]}")
+# How much of a single thought / tool result we post before a visible trim. The
+# channel splits this across several Discord messages; this only stops a
+# pathological dump from flooding the thread (the full text is always in !trace).
+MAX_POST = 12000
+
+
+def _brief(name: str, args: dict) -> str:
+    """A one-line view of what a tool call is about to do. NOT truncated - the
+    channel chunks long posts and !trace keeps the complete record; we want to
+    SEE the full shell command, not a clipped fragment."""
+    if name == "run_shell":
+        return "$ " + str(args.get("command", "")).replace("\n", " ")
+    if name == "write_file":
+        return f"write {args.get('path', '?')} ({len(str(args.get('content', '')))} chars)"
+    if name == "read_file":
+        return f"read {args.get('path', '?')}"
+    if name == "fetch_url":
+        return f"fetch {args.get('url', '?')}"
+    parts = [f"{k}={str(v)}".replace("\n", " ") for k, v in args.items()]
     return "(" + ", ".join(parts) + ")"
 
 
@@ -215,9 +232,10 @@ class AgentWorker(Worker):
             if reply.content.strip():
                 text = reply.content.strip()
                 self.findings.append(text[:200])
-                # No hard truncation - DiscordChannel splits long posts into
-                # multiple messages. Cap only to bound a pathological dump.
-                await self._post(f"[{self.current_step}] {text[:8000]}")
+                # Post the FULL thought - the channel chunks it across messages.
+                # Only a pathological dump gets a visible trim (-> !trace). This
+                # is the narration-side of the truncation the operator saw.
+                await self._post_long(f"[{self.current_step}]", text)
 
             # Periodic checkpoint: a consolidated rollup so the operator gets
             # signal, not just per-step noise. Template-only (no extra model
@@ -233,16 +251,31 @@ class AgentWorker(Worker):
                 continue
 
             submitted: str | None = None
+            escalate: dict | None = None
             for tc in reply.tool_calls:
                 if tc.name == "submit_flag":
                     submitted = str(tc.arguments.get("flag", "")).strip()
                     messages.append({"role": "tool", "tool_call_id": tc.id,
                                      "content": f"flag recorded: {submitted}"})
                     continue
-                self.tried.append(f"{tc.name}{_brief(tc.arguments)}")
-                await self._post(f"[{self.current_step}] {tc.name} {_brief(tc.arguments)}")
+                if tc.name == "request_escalation":
+                    escalate = {
+                        "difficulty": int(tc.arguments.get("difficulty", 0) or 0),
+                        "technique": str(tc.arguments.get("technique", "")).strip(),
+                        "reason": str(tc.arguments.get("reason", "")).strip(),
+                    }
+                    messages.append({"role": "tool", "tool_call_id": tc.id,
+                                     "content": "escalation requested - holding for an operator decision"})
+                    continue
+                brief = _brief(tc.name, tc.arguments)
+                self.tried.append(f"{tc.name}: {brief}")
+                await self._post_long(f"[{self.current_step}] {tc.name}", brief)
                 result = await self.toolbox.run(tc.name, tc.arguments)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
+                # Post the RESULT too. It was previously fed only to the model -
+                # so the operator saw the action but never its output: the other
+                # half of the "truncation". Chunked, with a visible trim -> !trace.
+                await self._post_long(f"[{self.current_step}] {tc.name} ->", result or "(no output)")
 
             if submitted:
                 kind = await self._halt(
@@ -258,6 +291,25 @@ class AgentWorker(Worker):
                 messages.append({
                     "role": "user",
                     "content": "The operator rejected that flag. Re-examine and try again.",
+                })
+
+            if escalate:
+                kind = await self._halt_escalation(escalate)
+                if kind == "cancelled":
+                    # Operator approved: !escalate cancelled us and is respawning
+                    # a specialist. Stand down quietly (the respawn announces).
+                    return await self._exit_killed()
+                if kind == "solved":
+                    return await self._exit_solved()
+                # !deny: no specialist is coming; the operator's note was folded
+                # in as a steer. Push on as triage.
+                self.chall.state = "solving"
+                self.tried.append(f"escalation denied (d{escalate['difficulty']})")
+                messages.append({
+                    "role": "user",
+                    "content": "The operator DENIED escalation - no specialist is coming. "
+                    "Push further yourself: try a different angle, and only stop if "
+                    "truly out of ideas.",
                 })
 
     def _checkpoint(self, cap: int) -> str:
@@ -315,6 +367,43 @@ class AgentWorker(Worker):
             if kind == "cancelled":
                 self._cancelled = True
             return None
+
+    async def _post_long(self, header: str, body: str) -> None:
+        """Post `header body`, letting the channel chunk it across messages.
+
+        The operator should see the full thought / full tool output, not a
+        silently clipped fragment. Only a pathological dump is trimmed, and
+        visibly - with the dropped-char count and a pointer to !trace.
+        """
+        body = (body or "").strip()
+        if len(body) > MAX_POST:
+            body = body[:MAX_POST] + f"\n...[+{len(body) - MAX_POST} chars - !trace for full]"
+        await self._post(f"{header} {body}".rstrip())
+
+    async def _halt_escalation(self, esc: dict) -> str:
+        """Record triage's difficulty read, post an ESCALATION REQUEST, and HALT.
+
+        Reuses the validation gate. Resolved by the bot: !escalate cancels us
+        and respawns a specialist (-> 'cancelled'); !deny folds a note and
+        re-opens us as triage (-> 'continue').
+        """
+        self.chall.difficulty = esc["difficulty"]
+        self.chall.technique = esc["technique"]
+        self.chall.escalation_reason = esc["reason"]
+        self._validation.clear()
+        self._validation_kind = None
+        self.chall.state = "needs_human"
+        await self.channel.post(
+            summary(
+                f"[escalate] **{self.name}** requests escalation",
+                self.findings[-6:],
+                escalation=esc,
+            )
+        )
+        await self._validation.wait()
+        if self._cancelled:
+            return "cancelled"
+        return self._validation_kind or "continue"
 
     async def _halt(self, announcement: str, *, candidate: bool = False) -> str:
         """Announce + HALT for operator validation. Returns the verdict.
