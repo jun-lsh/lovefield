@@ -61,11 +61,16 @@ class Dispatcher:
         kind: str = "dummy",
         model=None,
         autostart: bool = True,
+        role_override: str | None = None,
+        budget_mult: float = 1.0,
     ) -> Worker:
         """Build a worker for the challenge, register it, and start its loop.
 
         kind="dummy" -> scripted DummyWorker (no key/cost).
         kind="agent" -> real AgentWorker driving `model` (a ModelClient).
+
+        role_override forces the agent's doctrine (escalation respawns a
+        "specialist"); budget_mult scales its step cap (a specialist grinds).
         """
         lane = self.pick_lane(chall, override=lane_override)
 
@@ -84,7 +89,9 @@ class Dispatcher:
             # triage-always by default; a specialist-mode lane (deep_solver,
             # windows) gets the deep-solver doctrine instead. Escalation / !lane
             # onto such a lane flips the role for free.
-            role = "specialist" if lane.default_mode == "specialist" else "triage"
+            role = role_override or (
+                "specialist" if lane.default_mode == "specialist" else "triage"
+            )
             worker: Worker = AgentWorker(
                 lane,
                 chall,
@@ -97,7 +104,7 @@ class Dispatcher:
                 model=model,
                 workdir=workdir,
                 sandbox=sandbox,
-                max_steps=config.AGENT_MAX_STEPS,
+                max_steps=max(1, int(config.AGENT_MAX_STEPS * budget_mult)),
                 max_tokens=config.AGENT_MAX_TOKENS,
                 shell_timeout=config.SHELL_TIMEOUT,
                 checkpoint_every=config.AGENT_CHECKPOINT,

@@ -24,16 +24,28 @@ def summary(
     *,
     flag: str | None = None,
     needs_human: bool = False,
+    escalation: dict | None = None,
 ) -> str:
-    """The FINDINGS / CANDIDATE FLAG / NEEDS HUMAN block.
+    """The FINDINGS / CANDIDATE FLAG / ESCALATION / NEEDS HUMAN block.
 
     Discord-agnostic string builder - bot.py and the console both post the same
     block. Kept here (not in bot.py) so it's testable without a token.
+    `escalation` is {difficulty, technique, reason}; it renders the operator's
+    decision menu (resolved by !escalate / !deny).
     """
     lines = [post.strip(), "", "**FINDINGS**"]
     lines += [f"  - {f}" for f in findings] or ["  - (none)"]
     if flag:
         lines += ["", f"**CANDIDATE FLAG** -> `{flag}`  (human submits)"]
+    if escalation:
+        lines += [
+            "",
+            f"**ESCALATION REQUEST** - difficulty {escalation.get('difficulty', 0)}/5, "
+            f"technique: {escalation.get('technique') or '?'}",
+            f"  reason: {escalation.get('reason') or '-'}",
+            "  decide: `!escalate` (specialist, same lane) | `!escalate deep` | "
+            "`!escalate race [n]` | `!deny` (keep going as triage)",
+        ]
     if needs_human:
         lines += ["", "**NEEDS HUMAN** - stuck in a way a human must resolve"]
     return "\n".join(lines)

@@ -1,7 +1,7 @@
 """Local harness - proves the phase-1 control plane with NO Discord token.
 
 Run:  python cddc/simulate.py   (or: python -m cddc.simulate)
-      CDDC_SIM_DOCKER=1 python -m cddc.simulate  # also runs Docker sandbox
+      CDDC_SIM_DOCKER=1 python -m cddc.simulate  # also runs the Docker sandbox
 
 Exercises the done-criteria: every category routes to the right lane; a Worker
 streams scripted progress; an injected steer shows up in the next progress post
@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cddc.agent_worker import AgentWorker, _specs_for_lane, load_system
 from cddc.challenge import Challenge
-from cddc.channel import ConsoleChannel
+from cddc.channel import ConsoleChannel, WebhookChannel
 from cddc.dispatcher import Dispatcher
 from cddc.lanes import get_lane
 from cddc.models import FakeModel, Reply, ToolCall
@@ -249,12 +249,16 @@ async def scenario_sandbox_and_gating() -> None:
     assert {"run_shell", "submit_flag"} <= rev_tools, "rev missing core/submit_flag"
     web_tools = {s["function"]["name"] for s in _specs_for_lane(get_lane("web"))}
     assert "fetch_url" in web_tools, "web should offer fetch_url"
+    # raw has no allowlist -> it offers every advertised tool. submit_flag and
+    # request_escalation are always on (agent-handled), even on gated lanes.
     raw_tools = {s["function"]["name"] for s in _specs_for_lane(get_lane("raw"))}
-    assert len(raw_tools) == 5, f"raw should offer all 5 tools, got {raw_tools}"
-    ok("rev gates out fetch_url; web grants it; raw offers all; submit_flag always on")
+    assert {"run_shell", "read_file", "write_file", "fetch_url", "submit_flag",
+            "request_escalation"} <= raw_tools, f"raw missing core tools: {raw_tools}"
+    assert "request_escalation" in rev_tools, "escalation must be offered even on gated lanes"
+    ok("rev gates out fetch_url; web grants it; raw offers all; submit_flag/escalation always on")
 
 
-# --- scenario 7: real AgentWorker + real docker Sandbox ----------------------
+# --- scenario 7: real AgentWorker + real docker Sandbox (CDDC_SIM_DOCKER) -
 async def scenario_sandbox_agent() -> None:
     print("scenario: real agent sandbox lifecycle (docker)")
     from cddc import config
@@ -322,7 +326,110 @@ async def scenario_sandbox_agent() -> None:
     ok("agent tears the Docker sandbox down on !solved")
 
 
-# --- scenario 6: prompt composition - role isolation ---------------------
+# --- scenario 8: triage escalation (request -> deny -> continue -> solve) -
+async def scenario_escalation() -> None:
+    print("scenario: triage escalation (request -> deny -> continue -> solve)")
+    ch = Challenge(
+        id="e1", name="hard-rsa", category="crypto", thread_id=777,
+        description="ciphertext + public params; smells like a known RSA attack",
+    )
+    chan = ConsoleChannel("crypto", echo=False)
+    script = [
+        Reply(content="inventorying the workdir", tokens=50,
+              tool_calls=[ToolCall("t1", "run_shell", {"command": "echo workdir"})]),
+        Reply(content="this is a lattice/Franklin-Reiter job - beyond a cheap triage solve",
+              tokens=60,
+              tool_calls=[ToolCall("t2", "request_escalation",
+                                   {"difficulty": 4, "technique": "RSA/Franklin-Reiter",
+                                    "reason": "needs a specialist with lattice tooling"})]),
+        Reply(content="operator says grind it - retrying via the related-message angle",
+              tokens=60,
+              tool_calls=[ToolCall("t3", "run_shell", {"command": "echo CDDC{related_msg}"})]),
+        Reply(content="that decrypts cleanly, submitting", tokens=50,
+              tool_calls=[ToolCall("t4", "submit_flag", {"flag": "CDDC{related_msg}"})]),
+    ]
+    w = AgentWorker(
+        get_lane("crypto"), ch, chan,
+        id="we", name="crypto-e", model=FakeModel(script),
+        workdir=os.path.join("_files", "sim777"),
+        max_steps=40, max_tokens=200_000, shell_timeout=10, role="triage",
+    )
+    task = asyncio.create_task(w.run())
+
+    # triage hits the wall and HALTS with an escalation request (needs_human),
+    # recording its difficulty read on the challenge for the handoff
+    assert await wait_until(lambda: ch.state == "needs_human", timeout=5)
+    assert ch.difficulty == 4, f"difficulty not captured: {ch.difficulty}"
+    assert ch.technique == "RSA/Franklin-Reiter", "technique not captured"
+    assert any("ESCALATION REQUEST" in p for p in chan.posts), "no escalation block posted"
+    ok("triage requests escalation -> halts (needs_human), difficulty captured")
+
+    # operator DENIES (the !deny path == continue_with): fold a note + re-open;
+    # the worker pushes on as triage and reaches a candidate
+    w.continue_with("deny: no specialist free, push the related-message angle")
+    assert await wait_until(
+        lambda: "deny: no specialist free, push the related-message angle"
+        in w.status()["steers"]
+    )
+    assert await wait_until(lambda: ch.state == "candidate", timeout=5)
+    assert any("CDDC{related_msg}" in p for p in chan.posts), "no candidate after deny"
+    ok("!deny folds a note + re-opens -> triage pushes on to a candidate")
+
+    # tool RESULTS now post to the thread (the truncation fix), not just actions
+    assert any("-> CDDC{related_msg}" in p for p in chan.posts), "tool result not posted"
+    ok("tool results are posted to the thread, not only fed to the model")
+
+    w.mark_solved()
+    await task
+    assert ch.state == "solved"
+    ok("agent stands down on !solved after a denied escalation")
+
+
+# --- scenario 9: WebhookChannel - the on-site path ------------------------
+async def scenario_webhook() -> None:
+    print("scenario: WebhookChannel (on-site: narrate out via webhook + local steer)")
+    sent: list[str] = []  # what WOULD hit the webhook (injected sender, no network)
+    ch = Challenge(
+        id="wk1", name="onsite-warmup", category="crypto", thread_id=888,
+        description="a teammate's local on-site agent",
+    )
+    chan = WebhookChannel(
+        "https://discord.example/api/webhooks/fake", thread_id=888,
+        username="alice-crypto", sender=sent.append,
+    )
+    script = [
+        Reply(content="recon the workdir", tokens=40,
+              tool_calls=[ToolCall("t1", "run_shell", {"command": "echo hi"})]),
+        Reply(content="that's the flag", tokens=40,
+              tool_calls=[ToolCall("t2", "submit_flag", {"flag": "CDDC{onsite}"})]),
+    ]
+    w = AgentWorker(
+        get_lane("crypto"), ch, chan,
+        id="wk", name="alice-crypto", location="onsite", operator="alice",
+        model=FakeModel(script), workdir=os.path.join("_files", "sim888"),
+        max_steps=40, max_tokens=200_000, shell_timeout=10,
+    )
+    task = asyncio.create_task(w.run())
+
+    # on-site operator steers LOCALLY (no Discord) -> worker folds it in
+    chan.push_steer("try the affine-cipher angle")
+    assert await wait_until(lambda: "try the affine-cipher angle" in w.status()["steers"])
+    ok("local push_steer() reaches the worker (on-site steering, no Discord)")
+
+    # narration goes OUT through the webhook sender (Discord thread in prod),
+    # under the agent's own identity - no bot token, no gateway
+    assert await wait_until(lambda: ch.state == "candidate", timeout=5)
+    assert any("CDDC{onsite}" in s for s in sent), "candidate not sent via webhook"
+    assert any("alice-crypto" in s for s in sent), "agent identity missing from narration"
+    ok("narration posts out via the webhook sender (own identity, no gateway)")
+
+    w.mark_solved()
+    await task
+    assert ch.state == "solved"
+    ok("on-site agent stands down on operator confirm - same Worker, different seat")
+
+
+# --- scenario 10: prompt composition - role isolation ---------------------
 async def scenario_prompts() -> None:
     print("scenario: skills/ prompt composition (role isolation)")
     triage = load_system("crypto", "triage").lower()
@@ -342,6 +449,25 @@ async def scenario_prompts() -> None:
     ok("specialist NOT poisoned by triage 'move fast' doctrine")
 
 
+# --- scenario 11: skill docs are readable, but only through the skill root --
+async def scenario_skill_tools() -> None:
+    print("scenario: skill-library tools")
+    toolbox = Toolbox(
+        os.path.join("_files", "simskills"),
+        skills_dir=os.path.join("cddc", "skills"),
+    )
+
+    docs = await toolbox.run("list_skill_docs", {"path": "lanes/ctf-crypto"})
+    assert "lanes/ctf-crypto/SKILL.md" in docs, "crypto skill docs not listed"
+
+    body = await toolbox.run("read_skill_doc", {"path": "lanes/ctf-crypto/SKILL.md"})
+    assert "rsa" in body.lower(), "crypto skill doc not readable"
+
+    escaped = await toolbox.run("read_skill_doc", {"path": "../README.md"})
+    assert "path escapes skills dir" in escaped, "skill reader allowed path escape"
+    ok("agents can list/read skill docs without escaping cddc/skills")
+
+
 async def main() -> None:
     await scenario_routing()
     print()
@@ -355,9 +481,17 @@ async def main() -> None:
     print()
     await scenario_sandbox_and_gating()
     print()
-    await scenario_sandbox_agent()
+    await scenario_escalation()
+    print()
+    await scenario_webhook()
     print()
     await scenario_prompts()
+    print()
+    await scenario_skill_tools()
+    # The real-Docker scenario is opt-in (needs the ctf-sandbox image built).
+    if os.environ.get("CDDC_SIM_DOCKER"):
+        print()
+        await scenario_sandbox_agent()
     print("\nALL CHECKS PASSED [done]  (no Discord token, no model key, no cost)")
 
 
