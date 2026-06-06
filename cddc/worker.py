@@ -128,6 +128,29 @@ class Worker:
             "findings": list(self.findings),
         }
 
+    def trace_text(self) -> str:
+        """A readable dump of this worker's progress - what `!trace` writes.
+
+        Base version covers any worker (dummy, or an agent before it has a
+        message log). AgentWorker overrides it to append the full LLM trace.
+        """
+        s = self.status()
+        lines = [
+            f"=== trace: {s['name']} ({s['id']}) ===",
+            f"lane={s['lane']} state={s['state']} step={s['current_step']} "
+            f"budget={s['budget_used']} racing={s['racing']}",
+            "",
+            "TRIED:",
+            *([f"  {t}" for t in self.tried] or ["  (none)"]),
+            "",
+            "FINDINGS:",
+            *([f"  {f}" for f in self.findings] or ["  (none)"]),
+            "",
+            "STEERS:",
+            *([f"  {st}" for st in self.chall.steers] or ["  (none)"]),
+        ]
+        return "\n".join(lines)
+
     # --- control surface (registry routes !commands here) -------------------
     def steer(self, msg: str) -> None:
         """Fold a steer in via the direct inbox (registry broadcast/target).

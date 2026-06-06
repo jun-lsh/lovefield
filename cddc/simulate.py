@@ -16,7 +16,7 @@ import sys
 # Allow `python cddc/simulate.py` (adds repo root so `import cddc` resolves).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cddc.agent_worker import AgentWorker
+from cddc.agent_worker import AgentWorker, load_system
 from cddc.challenge import Challenge
 from cddc.channel import ConsoleChannel
 from cddc.dispatcher import Dispatcher
@@ -197,10 +197,36 @@ async def scenario_agent() -> None:
     assert w.status()["tokens"] == 240, "token accounting off"
     ok("agent runs tools, accounts tokens, emits a candidate flag")
 
+    # !trace dumps the full message+tool log, not just progress
+    trace = w.trace_text()
+    assert "full message log" in trace, "agent trace missing the message log"
+    assert "[tool result]" in trace, "agent trace missing tool results"
+    ok("trace_text() includes the full message+tool log")
+
     w.mark_solved()
     await task
     assert ch.state == "solved"
     ok("agent stands down on !solved")
+
+
+# --- scenario 6: prompt composition - role isolation ---------------------
+async def scenario_prompts() -> None:
+    print("scenario: skills/ prompt composition (role isolation)")
+    triage = load_system("crypto", "triage").lower()
+    specialist = load_system("rev", "specialist").lower()
+
+    # triage gets the move-fast doctrine + the crypto playbook + common rules
+    assert "triage agent" in triage, "triage role doctrine not loaded"
+    assert "anti-rabbit-hole" in triage, "triage hard rule missing"
+    assert "never submit a guess" in triage, "common rules not loaded"
+    assert "rsa" in triage, "crypto lane playbook not loaded"
+    ok("triage = common + env + triage role + lane playbook")
+
+    # specialist is NOT poisoned by the triage 'bail fast' bias
+    assert "specialist solver" in specialist, "specialist role doctrine not loaded"
+    assert "anti-rabbit-hole" not in specialist, "triage bias leaked into specialist!"
+    assert "reverse engineering" in specialist, "rev lane playbook not loaded"
+    ok("specialist NOT poisoned by triage 'move fast' doctrine")
 
 
 async def main() -> None:
@@ -213,6 +239,8 @@ async def main() -> None:
     await scenario_solo()
     print()
     await scenario_agent()
+    print()
+    await scenario_prompts()
     print("\nALL CHECKS PASSED [done]  (no Discord token, no model key, no cost)")
 
 

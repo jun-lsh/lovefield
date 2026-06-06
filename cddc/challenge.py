@@ -46,6 +46,11 @@ class Challenge:
     hard: bool = False      # operator foresight at allocation -> deep_solver
     state: str = "new"
     steers: list[str] = field(default_factory=list)
+    # Triage's difficulty read + escalation request (set when an agent calls
+    # request_escalation; carried into the specialist respawn as a handoff).
+    difficulty: int = 0          # 1 (trivial) .. 5 (very hard); 0 = unassessed
+    technique: str = ""          # named attack class the triage agent identified
+    escalation_reason: str = ""  # why it asked to escalate
 
     def __post_init__(self) -> None:
         if self.state not in STATES:
