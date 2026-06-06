@@ -91,6 +91,13 @@ AGENT_MAX_STEPS = int(_envs("CDDC_AGENT_MAX_STEPS", "40"))
 AGENT_MAX_TOKENS = int(_envs("CDDC_AGENT_MAX_TOKENS", "200000"))
 SHELL_TIMEOUT = int(_envs("CDDC_SHELL_TIMEOUT", "30"))
 
+# Where run_shell executes: "local" (host, no isolation) | "docker" (per-challenge
+# ctf-sandbox container, workdir bind-mounted). Crypto/web/research keep working
+# host-side without Docker on "local"; flip to "docker" to safely run untrusted
+# pwn/rev binaries. Requires the bot to run as a docker-capable user.
+CDDC_SANDBOX = _envs("CDDC_SANDBOX", "local").lower()
+CDDC_SANDBOX_IMAGE = _envs("CDDC_SANDBOX_IMAGE", "ctf-sandbox")
+
 def category_for_channel(channel_name: str) -> str:
     key = (channel_name or "").strip().lower().lstrip("#")
     return CHANNEL_CATEGORY.get(key, key)

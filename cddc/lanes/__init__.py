@@ -18,6 +18,14 @@ from __future__ import annotations
 
 from .base import Lane
 
+# Per-lane allowed tools (the agent filters tool_specs() to these). submit_flag is
+# always offered regardless. Today's tools are all generic; offline-analysis lanes
+# withhold fetch_url, online/research lanes grant it. Add binary-specific tools
+# (decompile, etc.) to the relevant lane here when they land. `raw` is left empty
+# (= offer all), the ungated escape hatch.
+_ANALYSIS = ("run_shell", "read_file", "write_file")
+_ONLINE = ("run_shell", "read_file", "write_file", "fetch_url")
+
 LANES: dict[str, Lane] = {
     "research_run": Lane(
         "research_run",
@@ -29,6 +37,7 @@ LANES: dict[str, Lane] = {
             "fire PoC at box via proxy",
             "capture candidate flag",
         ),
+        tools=_ONLINE,
     ),
     "rev": Lane(
         "rev",
@@ -40,6 +49,7 @@ LANES: dict[str, Lane] = {
             "isolate flag-check logic",
             "derive + capture candidate flag",
         ),
+        tools=_ANALYSIS,
     ),
     "pwn": Lane(
         "pwn",
@@ -51,6 +61,7 @@ LANES: dict[str, Lane] = {
             "run_remote through proxy (gated on local pass)",
             "capture candidate flag",
         ),
+        tools=_ANALYSIS,
     ),
     "crypto": Lane(
         "crypto",
@@ -62,6 +73,7 @@ LANES: dict[str, Lane] = {
             "verify decryption",
             "capture candidate flag",
         ),
+        tools=_ANALYSIS,
     ),
     "web": Lane(
         # analysis-only on the remote tier; live exploitation is on-site.
@@ -75,6 +87,7 @@ LANES: dict[str, Lane] = {
             "capture candidate flag",
         ),
         race_capable=False,
+        tools=_ONLINE,
     ),
     "forensics": Lane(
         # flat + wide; guessy ones flag fast, don't grind. Not worth racing.
@@ -87,6 +100,7 @@ LANES: dict[str, Lane] = {
             "capture candidate flag",
         ),
         race_capable=False,
+        tools=_ANALYSIS,
     ),
     "ai": Lane(
         # ML/LLM challenges. Edge = a PC that won't die running pytorch.
@@ -99,6 +113,7 @@ LANES: dict[str, Lane] = {
             "verify output",
             "capture candidate flag",
         ),
+        tools=_ONLINE,
     ),
     "misc": Lane(
         # "dunno wtf" catch-all - weird programming / esoteric research. Thin
@@ -112,6 +127,7 @@ LANES: dict[str, Lane] = {
             "capture candidate flag",
         ),
         race_capable=False,
+        tools=_ONLINE,
     ),
     "deep_solver": Lane(
         # the heavy/privileged tier: kernel pwn, RF/radio, custom-arch, exotic
@@ -125,6 +141,7 @@ LANES: dict[str, Lane] = {
             "long grind with periodic thread checkpoints",
             "capture candidate flag",
         ),
+        tools=_ONLINE,
     ),
     "windows": Lane(
         # MINOR lane - most Windows work goes to on-site laptops. Snapshottable
@@ -138,6 +155,7 @@ LANES: dict[str, Lane] = {
             "revert snapshot, capture candidate flag",
         ),
         race_capable=False,
+        tools=_ANALYSIS,
     ),
     "hw_research": Lane(
         # hardware-challenge research assist (on-site, human-led). Fast lookups +
@@ -151,6 +169,7 @@ LANES: dict[str, Lane] = {
             "hand to on-site operator to run on the spot",
         ),
         race_capable=False,
+        tools=_ONLINE,
     ),
     "raw": Lane(
         # escape hatch - trivial challs where harness overhead > the challenge.

@@ -68,12 +68,18 @@ def _spec(name: str, desc: str, props: dict, required: list[str]) -> dict:
 
 
 class Toolbox:
-    """Executes tool calls in `workdir`. Path access is confined to the workdir."""
+    """Executes tool calls in `workdir`. Path access is confined to the workdir.
 
-    def __init__(self, workdir: str, shell_timeout: int = 30) -> None:
+    If a `sandbox` is given, run_shell executes inside that container (the workdir
+    is bind-mounted in, so read/write still operate host-side on the same files);
+    otherwise run_shell runs on the host with no isolation.
+    """
+
+    def __init__(self, workdir: str, shell_timeout: int = 30, *, sandbox=None) -> None:
         self.workdir = pathlib.Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.shell_timeout = shell_timeout
+        self.sandbox = sandbox
 
     async def run(self, name: str, args: dict) -> str:
         try:
@@ -99,6 +105,8 @@ class Toolbox:
     async def _shell(self, command: str) -> str:
         if not command.strip():
             return "(empty command)"
+        if self.sandbox is not None:
+            return _truncate(await self.sandbox.exec(command, self.shell_timeout))
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=str(self.workdir),

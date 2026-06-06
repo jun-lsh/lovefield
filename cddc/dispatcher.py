@@ -75,6 +75,11 @@ class Dispatcher:
 
         if kind == "agent":
             workdir = os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id))
+            sandbox = None
+            if config.CDDC_SANDBOX == "docker":
+                from .sandbox import Sandbox
+
+                sandbox = Sandbox(config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir)
             worker: Worker = AgentWorker(
                 lane,
                 chall,
@@ -86,6 +91,7 @@ class Dispatcher:
                 on_candidate=on_candidate,
                 model=model,
                 workdir=workdir,
+                sandbox=sandbox,
                 max_steps=config.AGENT_MAX_STEPS,
                 max_tokens=config.AGENT_MAX_TOKENS,
                 shell_timeout=config.SHELL_TIMEOUT,

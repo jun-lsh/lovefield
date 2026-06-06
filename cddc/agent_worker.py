@@ -32,6 +32,21 @@ Doctrine:
 Flags are usually formatted CDDC{{...}} unless the challenge states otherwise."""
 
 
+def _specs_for_lane(lane: Lane) -> list[dict]:
+    """Filter tool_specs() to the lane's allowed set.
+
+    An empty `lane.tools` means "offer all" (back-compat for `raw` / unset lanes).
+    `submit_flag` is always offered - it is handled in the agent, not the toolbox.
+    """
+    specs = tool_specs()
+    if not lane.tools:
+        return specs
+    return [
+        s for s in specs
+        if s["function"]["name"] in lane.tools or s["function"]["name"] == "submit_flag"
+    ]
+
+
 def _brief(args: dict) -> str:
     parts = []
     for k, v in args.items():
@@ -54,6 +69,7 @@ class AgentWorker(Worker):
         on_candidate=None,
         model: ModelClient,
         workdir: str,
+        sandbox=None,
         max_steps: int,
         max_tokens: int,
         shell_timeout: int = 30,
@@ -64,7 +80,8 @@ class AgentWorker(Worker):
             on_candidate=on_candidate,
         )
         self.model = model
-        self.toolbox = Toolbox(workdir, shell_timeout)
+        self.sandbox = sandbox
+        self.toolbox = Toolbox(workdir, shell_timeout, sandbox=sandbox)
         self.max_steps = max_steps
         self.max_tokens = max_tokens
         self._tokens = 0
@@ -81,6 +98,21 @@ class AgentWorker(Worker):
             f"[start] **{self.name}** ({self.location}) agent on `{self.lane.name}` "
             f"- model {getattr(self.model, 'model', '?')}"
         )
+        if self.sandbox is not None:
+            try:
+                await self.sandbox.start()
+                await self._post(f"[sandbox] container `{self.sandbox.name}` up")
+            except Exception as e:
+                await self._post(f"[sandbox] failed to start: {e!r} - standing down", force=True)
+                return await self._exit_killed()
+        try:
+            await self._run_loop()
+        finally:
+            if self.sandbox is not None:
+                await self.sandbox.teardown()
+                await self._post(f"[sandbox] container `{self.sandbox.name}` removed", force=True)
+
+    async def _run_loop(self) -> None:
         files = ", ".join(os.path.basename(f) for f in self.chall.files) or "(none)"
         messages: list[dict] = [
             {"role": "system", "content": SYSTEM.format(lane=self.lane.name)},
@@ -92,7 +124,7 @@ class AgentWorker(Worker):
                 ),
             },
         ]
-        specs = tool_specs()
+        specs = _specs_for_lane(self.lane)
         budget_bonus = 0
 
         while True:
