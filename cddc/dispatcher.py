@@ -7,8 +7,10 @@ bot calls this on thread-create; simulate.py calls it directly.
 from __future__ import annotations
 
 import asyncio
+import os
 
 from . import config
+from .agent_worker import AgentWorker
 from .challenge import Challenge
 from .channel import Channel
 from .lanes import LANES, get_lane
@@ -56,26 +58,50 @@ class Dispatcher:
         operator: str | None = None,
         on_candidate=None,
         tick: float | None = None,
+        kind: str = "dummy",
+        model=None,
         autostart: bool = True,
     ) -> Worker:
-        """Build a worker for the challenge, register it, and start its loop."""
+        """Build a worker for the challenge, register it, and start its loop.
+
+        kind="dummy" -> scripted DummyWorker (no key/cost).
+        kind="agent" -> real AgentWorker driving `model` (a ModelClient).
+        """
         lane = self.pick_lane(chall, override=lane_override)
 
         self._n += 1
         wid = f"w{self._n}"
         name = f"{lane.name}-{self._n}"
 
-        worker = DummyWorker(
-            lane,
-            chall,
-            channel,
-            id=wid,
-            name=name,
-            location=location or self.default_location,
-            operator=operator,
-            on_candidate=on_candidate,
-            tick=config.STEP_DELAY if tick is None else tick,
-        )
+        if kind == "agent":
+            workdir = os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id))
+            worker: Worker = AgentWorker(
+                lane,
+                chall,
+                channel,
+                id=wid,
+                name=name,
+                location=location or self.default_location,
+                operator=operator,
+                on_candidate=on_candidate,
+                model=model,
+                workdir=workdir,
+                max_steps=config.AGENT_MAX_STEPS,
+                max_tokens=config.AGENT_MAX_TOKENS,
+                shell_timeout=config.SHELL_TIMEOUT,
+            )
+        else:
+            worker = DummyWorker(
+                lane,
+                chall,
+                channel,
+                id=wid,
+                name=name,
+                location=location or self.default_location,
+                operator=operator,
+                on_candidate=on_candidate,
+                tick=config.STEP_DELAY if tick is None else tick,
+            )
 
         chall.channel = channel
         chall.state = "dispatched"

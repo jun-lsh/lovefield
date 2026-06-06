@@ -16,10 +16,12 @@ import sys
 # Allow `python cddc/simulate.py` (adds repo root so `import cddc` resolves).
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from cddc.agent_worker import AgentWorker
 from cddc.challenge import Challenge
 from cddc.channel import ConsoleChannel
 from cddc.dispatcher import Dispatcher
 from cddc.lanes import get_lane
+from cddc.models import FakeModel, Reply, ToolCall
 from cddc.registry import Registry
 from cddc.worker import DummyWorker
 
@@ -165,6 +167,42 @@ async def scenario_solo() -> None:
     ok("!solo flips racing off and drops back to solo (inverse of !race)")
 
 
+# --- scenario 5: real AgentWorker loop (fake model, no key, no cost) ------
+async def scenario_agent() -> None:
+    print("scenario: real agent tool-loop (fake model)")
+    ch = Challenge(
+        id="a1", name="warmup", category="crypto", thread_id=555,
+        description="decode the blob and find the flag",
+    )
+    chan = ConsoleChannel("crypto", echo=False)
+    # Scripted model: inspect -> echo a flag-ish string -> submit_flag.
+    script = [
+        Reply(content="checking the workdir", tokens=80,
+              tool_calls=[ToolCall("t1", "run_shell", {"command": "echo aGVsbG8="})]),
+        Reply(content="that base64 looks like the flag, verifying", tokens=90,
+              tool_calls=[ToolCall("t2", "run_shell", {"command": "echo CDDC{fake_solve}"})]),
+        Reply(content="confirmed", tokens=70,
+              tool_calls=[ToolCall("t3", "submit_flag", {"flag": "CDDC{fake_solve}"})]),
+    ]
+    w = AgentWorker(
+        get_lane("crypto"), ch, chan,
+        id="wa", name="crypto-a", model=FakeModel(script),
+        workdir=os.path.join("_files", "sim555"),
+        max_steps=40, max_tokens=200_000, shell_timeout=10,
+    )
+    task = asyncio.create_task(w.run())
+
+    assert await wait_until(lambda: ch.state == "candidate", timeout=5)
+    assert any("CDDC{fake_solve}" in p for p in chan.posts), "candidate flag not posted"
+    assert w.status()["tokens"] == 240, "token accounting off"
+    ok("agent runs tools, accounts tokens, emits a candidate flag")
+
+    w.mark_solved()
+    await task
+    assert ch.state == "solved"
+    ok("agent stands down on !solved")
+
+
 async def main() -> None:
     await scenario_routing()
     print()
@@ -173,7 +211,9 @@ async def main() -> None:
     await scenario_control()
     print()
     await scenario_solo()
-    print("\nALL PHASE-1 SIM CHECKS PASSED [done]  (no Discord token used)")
+    print()
+    await scenario_agent()
+    print("\nALL CHECKS PASSED [done]  (no Discord token, no model key, no cost)")
 
 
 if __name__ == "__main__":

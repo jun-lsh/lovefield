@@ -74,6 +74,23 @@ STEP_DELAY = float(os.environ.get("CDDC_STEP_DELAY", "8"))
 ALERT_MODE = os.environ.get("ALERT_MODE", "user").split("#")[0].strip().lower()
 ALERT_USER_ID = os.environ.get("ALERT_USER_ID", "").split("#")[0].strip()
 
+
+def _envs(name: str, default: str) -> str:
+    return os.environ.get(name, default).split("#")[0].strip()
+
+
+# --- real agent (DeepSeek, OpenAI-compatible) ------------------------------
+# Worker kind: "dummy" (scripted, no key/cost) | "agent" (real DeepSeek loop).
+WORKER_KIND = _envs("CDDC_WORKER", "dummy").lower()
+DEEPSEEK_API_KEY = _envs("DEEPSEEK_API_KEY", "")
+DEEPSEEK_BASE_URL = _envs("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+# deepseek-chat = v4-flash non-thinking (cheapest churn). Override per taste.
+CHURN_MODEL = _envs("CDDC_CHURN_MODEL", "deepseek-chat")
+# Hard caps so a runaway loop can't burn money.
+AGENT_MAX_STEPS = int(_envs("CDDC_AGENT_MAX_STEPS", "40"))
+AGENT_MAX_TOKENS = int(_envs("CDDC_AGENT_MAX_TOKENS", "200000"))
+SHELL_TIMEOUT = int(_envs("CDDC_SHELL_TIMEOUT", "30"))
+
 def category_for_channel(channel_name: str) -> str:
     key = (channel_name or "").strip().lower().lstrip("#")
     return CHANNEL_CATEGORY.get(key, key)

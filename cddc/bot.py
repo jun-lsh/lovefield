@@ -28,19 +28,33 @@ from .config import (
     ALERT_MODE,
     ALERT_USER_ID,
     CATEGORY_LANE,
+    CHURN_MODEL,
+    DEEPSEEK_API_KEY,
+    DEEPSEEK_BASE_URL,
     DOWNLOAD_DIR,
     IGNORE_CHANNELS,
     STATUS_CHANNEL,
+    WORKER_KIND,
     category_for_channel,
 )
 from .dispatcher import Dispatcher
 from .lanes import LANES
+from .models import DeepSeekClient
 from .registry import Registry
 
 # .env is loaded by config.py (imported above) before its env reads.
 
 registry = Registry()
 dispatcher = Dispatcher(registry)
+
+# Build the model client once if we're in agent mode and a key is present;
+# otherwise fall back to dummy workers (scripted, no key/cost).
+_model = None
+if WORKER_KIND == "agent":
+    if DEEPSEEK_API_KEY:
+        _model = DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL)
+    else:
+        print("WORKER_KIND=agent but DEEPSEEK_API_KEY is empty -> using dummy workers")
 
 intents = discord.Intents.default()
 intents.message_content = True  # PRIVILEGED - enable it in the Developer Portal
@@ -339,15 +353,17 @@ async def cmd_start(ctx: commands.Context, *, description: str = "") -> None:
         thread_id=thread.id,
         files=local + links,
     )
+    kind = "agent" if _model is not None else "dummy"
     worker = await dispatcher.dispatch(
-        chall, DiscordChannel(thread, bot), on_candidate=_candidate_hook
+        chall, DiscordChannel(thread, bot), on_candidate=_candidate_hook,
+        kind=kind, model=_model,
     )
 
     note = f"downloaded {len(local)} file(s)" if local else "no attachments"
     if links:
         note += f", {len(links)} link(s) recorded (not fetched yet)"
     await ctx.send(
-        f"started **{worker.name}** on lane `{worker.lane.name}` "
+        f"started **{worker.name}** ({kind}) on lane `{worker.lane.name}` "
         f"[{worker.lane.default_mode}] - {note}"
     )
 
