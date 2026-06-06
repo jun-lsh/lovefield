@@ -39,6 +39,7 @@ from .config import (
     DEEPSEEK_BASE_URL,
     DOWNLOAD_DIR,
     ESCALATION_BUDGET_MULT,
+    HARNESS_CLI,
     IGNORE_CHANNELS,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
@@ -80,6 +81,15 @@ def _build_model():
 
 
 _model = _build_model() if WORKER_KIND == "agent" else None
+
+# Resolve the dispatch kind once. "harness" runs the CLI agents in tmux (no
+# ModelClient); "agent" needs a built model; otherwise dummy.
+if WORKER_KIND == "harness":
+    _KIND = "harness"
+elif _model is not None:
+    _KIND = "agent"
+else:
+    _KIND = "dummy"
 
 intents = discord.Intents.default()
 intents.message_content = True  # PRIVILEGED - enable it in the Developer Portal
@@ -480,7 +490,6 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
         w.cancel()
         registry.remove(ctx.channel.id, w)
 
-    kind = "agent" if _model is not None else "dummy"
     spawned = []
     for _ in range(n):
         new_chall = dataclasses.replace(ch, state="dispatched", steers=list(ch.steers))
@@ -488,7 +497,7 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
             new_chall, channel,
             lane_override=lane_override,
             on_candidate=_candidate_hook,
-            kind=kind, model=_model,
+            kind=_KIND, model=_model, cli=HARNESS_CLI,
             role_override="specialist",
             budget_mult=ESCALATION_BUDGET_MULT,
         )
@@ -545,17 +554,16 @@ async def cmd_start(ctx: commands.Context, *, description: str = "") -> None:
         thread_id=thread.id,
         files=local + links,
     )
-    kind = "agent" if _model is not None else "dummy"
     worker = await dispatcher.dispatch(
         chall, DiscordChannel(thread, bot), on_candidate=_candidate_hook,
-        kind=kind, model=_model,
+        kind=_KIND, model=_model, cli=HARNESS_CLI,
     )
 
     note = f"downloaded {len(local)} file(s)" if local else "no attachments"
     if links:
         note += f", {len(links)} link(s) recorded (not fetched yet)"
     await ctx.send(
-        f"started **{worker.name}** ({kind}) on lane `{worker.lane.name}` "
+        f"started **{worker.name}** ({_KIND}) on lane `{worker.lane.name}` "
         f"[{worker.lane.default_mode}] - {note}"
     )
 

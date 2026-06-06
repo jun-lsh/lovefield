@@ -5,3 +5,6 @@ python-dotenv>=1.0,<2
 openai>=1.40,<2
 # Claude provider uses the Anthropic SDK (only needed for CDDC_PROVIDER=claude).
 anthropic>=0.40
+# Harness worker (CDDC_WORKER=harness) drives the claude/codex CLIs in tmux from
+# the host. Needs a `tmux` binary on the host too.
+libtmux>=0.37,<1

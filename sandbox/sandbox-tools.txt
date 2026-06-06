@@ -18,7 +18,7 @@ LAYERS
 
 base
   Present now:
-    ubuntu, python3, pip, venv, git, curl, wget, file, jq, xxd, zip/unzip
+    ubuntu, python3, pip, venv, git, curl, wget, file, jq, xxd, zip/unzip, tmux
   Purpose:
     Common OS/runtime layer for all challenge work.
 
@@ -55,6 +55,17 @@ forens
 ai
   Placeholder for:
     numpy, scipy, scikit-learn, CPU torch, keras, transformers, datasets
+
+harness
+  Present now:
+    claude: native install at ~/.local/bin/claude (via claude.ai/install.sh)
+    codex:  npm -g @openai/codex
+    non-root user `ctf` (some CLIs refuse to run as root)
+  Purpose:
+    The harness worker (CDDC_WORKER=harness) runs these CLIs in a tmux session
+    via `docker exec`, driven from the host by libtmux. The API key is passed
+    through at exec time (-e ANTHROPIC_API_KEY / -e OPENAI_API_KEY), never baked
+    into the image.
 
 NOTES
 -----

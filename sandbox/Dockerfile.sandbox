@@ -32,6 +32,7 @@ RUN apt-get update \
         python3 \
         python3-pip \
         python3-venv \
+        tmux \
         unzip \
         wget \
         xxd \
@@ -40,15 +41,56 @@ RUN apt-get update \
 
 WORKDIR /challenge
 
-# ── web layer: Node/npm/browser-facing helpers ──────────────────────────────
-FROM base AS web
+# ── harness layer: CLI coding agents (claude code / codex) ──────────────────
+FROM base AS harness
 
-# Web tooling starts light: npm/node only. Browser/runtime extras stay deferred.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         nodejs \
         npm \
     && rm -rf /var/lib/apt/lists/*
+
+# The harness worker (cddc/harness_worker.py) drives these CLIs in a tmux session
+# via `docker exec`. tmux is in the base layer; node/npm come from here.
+# Codex ships as a self-contained npm global.
+RUN npm install -g @openai/codex \
+    && npm cache clean --force
+
+# `claude --dangerously-skip-permissions` refuses to run as root, so create a
+# non-root user the harness can exec as (set CDDC_HARNESS_USER=ctf). Its uid is
+# NOT fixed here: TmuxHarness._align_user() retags `ctf` to the host user's uid at
+# runtime (usermod -o), so it can read the 0600 host credentials we bind-mount and
+# write the bind-mounted challenge dir - no matter what uid this image was built
+# with (the base image's default `ubuntu` user squats on 1000).
+RUN useradd -m -s /bin/bash ctf
+
+# Install Claude Code via its NATIVE installer (into ~/.local/bin/claude), NOT the
+# npm package. The npm `@anthropic-ai/claude-code` is only a launcher that expects
+# this native binary; without it claude nags "command at ~/.local/bin/claude
+# missing or broken - run claude install to repair" and never reaches its chat
+# input. Installing natively as ctf and putting ~/.local/bin first on PATH makes
+# `claude` run the real binary directly, no launcher, no nag. `|| true` so a build
+# network hiccup doesn't kill the image (codex still works).
+RUN su - ctf -c 'curl -fsSL https://claude.ai/install.sh | bash' || true
+ENV PATH=/home/ctf/.local/bin:${PATH}
+
+# Pre-create the config dirs so the harness can bind-mount single credential files
+# (~/.claude/.credentials.json, ~/.codex/auth.json) into a ctf-owned parent the
+# CLI can still write its other state into.
+RUN su - ctf -c 'mkdir -p ~/.claude ~/.codex'
+
+COPY sandbox-tools.txt /tools.txt
+
+RUN printf '%s\n' \
+    'harness layer installed' \
+    'apt: tmux (base layer)' \
+    'claude: native install at ~/.local/bin/claude (ctf)' \
+    'npm -g: @openai/codex (codex)' \
+    'user: ctf (non-root; for CLIs that refuse to run as root)' \
+    > /opt/cddc-harness.txt
+
+# ── web layer: Node/npm/browser-facing helpers ──────────────────────────────
+FROM harness AS web
 
 RUN printf '%s\n' \
     'web layer installed' \
@@ -147,9 +189,7 @@ RUN printf '%s\n' \
     'TODO: add numpy/scipy/sklearn, CPU torch, keras, transformers as needed' \
     > /opt/cddc-ai.txt
 
-# Final image currently includes every placeholder layer above.
+# Final image includes every layer above.
 FROM ai AS sandbox
-
-COPY sandbox-tools.txt /tools.txt
 
 CMD ["/bin/bash"]

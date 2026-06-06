@@ -32,10 +32,14 @@ class Sandbox:
         host_workdir: str,
         *,
         mount: str = "/challenge",
+        extra_mounts: list[str] | None = None,
     ) -> None:
         self.image = image
         self.host_workdir = host_workdir
         self.mount = mount
+        # Extra `-v` specs appended to `docker run` (e.g. host credential files
+        # for the harness CLIs). Each is a full "src:dst[:opts]" string.
+        self.extra_mounts = list(extra_mounts or [])
         self.name = f"cddc-{thread_id}"
         self._started = False
 
@@ -50,12 +54,16 @@ class Sandbox:
         os.makedirs(self.host_workdir, exist_ok=True)
         host_abs = os.path.abspath(self.host_workdir)
         # Drop a stale container of the same name (e.g. from a crashed prior run).
-        await self._docker("rm", "-f", self.name)
+        # TODO: decide when to delete. it could contain solve scripts / important stuff
+        await self._docker("stop", self.name)
+        mount_args: list[str] = ["-v", f"{host_abs}:{self.mount}:Z"]
+        for spec in self.extra_mounts:
+            mount_args += ["-v", spec]
         rc, out = await self._docker(
             "run", "-d", "--rm",
             "--name", self.name,
             "-w", self.mount,
-            "-v", f"{host_abs}:{self.mount}:Z",
+            *mount_args,
             self.image,
             "sleep", "infinity",
         )
@@ -85,10 +93,10 @@ class Sandbox:
     async def teardown(self) -> None:
         """Force-remove the container. Best-effort; swallow everything."""
         # TODO: save solve script and important files before tearing down
-        # try:
-        #     await self._docker("rm", "-f", self.name)
-        # except Exception:
-        #     pass
+        try:
+            await self._docker("stop", self.name)
+        except Exception:
+            pass
         self._started = False
 
     async def _docker(self, *args: str, timeout: int | None = None) -> tuple[int, str]:

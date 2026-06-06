@@ -60,14 +60,18 @@ class Dispatcher:
         tick: float | None = None,
         kind: str = "dummy",
         model=None,
+        cli: str | None = None,
         autostart: bool = True,
         role_override: str | None = None,
         budget_mult: float = 1.0,
     ) -> Worker:
         """Build a worker for the challenge, register it, and start its loop.
 
-        kind="dummy" -> scripted DummyWorker (no key/cost).
-        kind="agent" -> real AgentWorker driving `model` (a ModelClient).
+        kind="dummy"   -> scripted DummyWorker (no key/cost).
+        kind="agent"   -> real AgentWorker driving `model` (a ModelClient).
+        kind="harness" -> HarnessWorker driving a CLI agent (claude/codex) in a
+                          tmux session inside the sandbox container; `cli` picks
+                          which CLI (defaults to config.HARNESS_CLI).
 
         role_override forces the agent's doctrine (escalation respawns a
         "specialist"); budget_mult scales its step cap (a specialist grinds).
@@ -109,6 +113,52 @@ class Dispatcher:
                 shell_timeout=config.SHELL_TIMEOUT,
                 checkpoint_every=config.AGENT_CHECKPOINT,
                 role=role,
+            )
+        elif kind == "harness":
+            from .harness import TmuxHarness, credential_mounts
+            from .harness_worker import HarnessWorker
+            from .sandbox import Sandbox
+
+            workdir = os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id))
+            which = (cli or config.HARNESS_CLI).lower()
+            launch = config.CODEX_CLI_CMD if which == "codex" else config.CLAUDE_CLI_CMD
+            keys_csv = config.CODEX_STARTUP_KEYS if which == "codex" else config.CLAUDE_STARTUP_KEYS
+            startup_keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
+            # Share the host's claude/codex login into the container so the CLI is
+            # already authenticated (otherwise it stalls on the login screen).
+            creds = credential_mounts(config.HARNESS_USER) if config.HARNESS_SHARE_CREDS else []
+            # The container is MANDATORY here - the CLI runs inside it via
+            # `docker exec`, so we always build a Sandbox (ignoring CDDC_SANDBOX).
+            sandbox = Sandbox(
+                config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir, extra_mounts=creds
+            )
+            session = TmuxHarness(
+                which, sandbox, workdir,
+                launch_cmd=launch,
+                session_name=f"cddc-{chall.thread_id}-{which}",
+                user=config.HARNESS_USER,
+                startup_keys=startup_keys,
+            )
+            role = role_override or (
+                "specialist" if lane.default_mode == "specialist" else "triage"
+            )
+            worker = HarnessWorker(
+                lane,
+                chall,
+                channel,
+                id=wid,
+                name=name,
+                location=location or self.default_location,
+                operator=operator,
+                on_candidate=on_candidate,
+                session=session,
+                cli=which,
+                max_minutes=config.HARNESS_MAX_MINUTES,
+                poll_interval=config.HARNESS_POLL,
+                role=role,
+                checkpoint_every=config.AGENT_CHECKPOINT,
+                halt_on_flag=config.HARNESS_HALT_ON_FLAG,
+                flag_blacklist=config.FLAG_BLACKLIST,
             )
         else:
             worker = DummyWorker(

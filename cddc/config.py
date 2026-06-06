@@ -102,6 +102,39 @@ CLAUDE_MAX_TOKENS = int(_envs("CDDC_CLAUDE_MAX_TOKENS", "8000"))
 OPENAI_API_KEY = _envs("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = _envs("OPENAI_BASE_URL", "https://api.openai.com/v1")
 CODEX_MODEL = _envs("CDDC_CODEX_MODEL", "gpt-5-codex")
+
+# --- harness worker (CDDC_WORKER=harness) ----------------------------------
+# Runs the FULL CLI coding agent (claude code / codex) inside the sandbox
+# container, driven from the host via libtmux (see harness.py / harness_worker.py)
+# instead of our own model tool-loop. The bot's env must carry the matching key
+# (ANTHROPIC_API_KEY for claude, OPENAI_API_KEY for codex) - it is passed THROUGH
+# to the container, never baked into the image. The HOST needs `tmux` installed.
+HARNESS_CLI = _envs("CDDC_HARNESS_CLI", "claude").lower()  # "claude" | "codex"
+# Per-CLI launch command run in the container (operators add flags per version).
+# claude/codex run unattended, so they need their auto-approve flags - it is the
+# sandbox container that provides isolation, not the CLI's own permission prompt.
+CLAUDE_CLI_CMD = _envs("CDDC_CLAUDE_CLI_CMD", "claude --dangerously-skip-permissions")
+CODEX_CLI_CMD = _envs("CDDC_CODEX_CLI_CMD", "codex --full-auto")
+# Comma-separated tmux key names sent before the kickoff to clear each CLI's
+# startup gate. claude's bypass-permissions warning needs Down (to "Yes, I
+# accept") then Enter; codex usually needs nothing.
+CLAUDE_STARTUP_KEYS = _envs("CDDC_CLAUDE_STARTUP_KEYS", "Down,Enter")
+CODEX_STARTUP_KEYS = _envs("CDDC_CODEX_STARTUP_KEYS", "")
+# Run the CLI as this container user ("" = root). Set to a non-root user (e.g.
+# "ctf") if your CLI refuses to run as root (claude --dangerously-skip-permissions
+# does). The Dockerfile creates a `ctf` user for this.
+HARNESS_USER = _envs("CDDC_HARNESS_USER", "")
+HARNESS_POLL = float(_envs("CDDC_HARNESS_POLL", "5"))          # screen-poll seconds
+HARNESS_MAX_MINUTES = float(_envs("CDDC_HARNESS_MAX_MINUTES", "20"))  # wall-clock cap
+# Share the host's claude/codex login (~/.claude, ~/.claude.json, ~/.codex) into
+# the container so the CLIs don't get stuck on login. On by default.
+HARNESS_SHARE_CREDS = _envs("CDDC_HARNESS_SHARE_CREDS", "1").lower() not in ("0", "false", "no", "")
+# Candidate flags announce but DON'T halt the agent by default (the CLI keeps
+# working after printing a guess). Flip on for the classic validation halt.
+HARNESS_HALT_ON_FLAG = _envs("CDDC_HARNESS_HALT_ON_FLAG", "0").lower() in ("1", "true", "yes")
+# Maintained blacklist of fake flags to ignore (comma-separated), on top of the
+# built-in placeholders and the prompt's own example tokens.
+FLAG_BLACKLIST = [f.strip() for f in _envs("CDDC_FLAG_BLACKLIST", "").split(",") if f.strip()]
 # Hard caps so a runaway loop can't burn money.
 AGENT_MAX_STEPS = int(_envs("CDDC_AGENT_MAX_STEPS", "40"))
 AGENT_MAX_TOKENS = int(_envs("CDDC_AGENT_MAX_TOKENS", "200000"))

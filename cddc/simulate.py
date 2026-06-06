@@ -211,6 +211,90 @@ async def scenario_agent() -> None:
     ok("agent stands down on !solved")
 
 
+# --- scenario 5b: CLI harness worker (fake tmux session, no docker/key) ---
+async def scenario_harness() -> None:
+    print("scenario: CLI harness worker (fake tmux session)")
+    from cddc.harness import FakeHarness
+    from cddc.harness_worker import HarnessWorker
+
+    ch = Challenge(
+        id="h1", name="harness-warmup", category="crypto", thread_id=606,
+        description="run a real CLI agent in tmux",
+    )
+    chan = ConsoleChannel("crypto", echo=False)
+    # Cumulative pane snapshots (append-mostly scrollback). The placeholder line
+    # echoes the flag FORMAT (as the real CLI does) and must be IGNORED; the real
+    # flag on the last frame must be announced.
+    captures = [
+        "$ claude\nthinking about the challenge...",
+        "$ claude\nthinking...\nthe flag will look like CDDC{...}, let me inspect the files",
+        "$ claude\nthinking...\nthe flag will look like CDDC{...}, let me inspect the files\n"
+        "found it: CDDC{harness_solve}",
+    ]
+    session = FakeHarness(captures, stay_alive=True)
+    w = HarnessWorker(
+        get_lane("crypto"), ch, chan,
+        id="wh", name="crypto-h", session=session, cli="claude",
+        max_minutes=999, poll_interval=0.02,
+    )
+    # Operator steers immediately - it must reach the live CLI as keystrokes.
+    chan.inject_steer("try the vigenere angle")
+    task = asyncio.create_task(w.run())
+
+    # start() fed the stacked skills prompt + challenge brief to the CLI
+    assert await wait_until(lambda: session.started, timeout=3)
+    assert "Challenge: harness-warmup" in session.start_prompt, "task brief not handed to CLI"
+    ok("harness starts the CLI session with the composed task prompt")
+
+    # the steer is forwarded into the CLI and recorded in status()
+    assert await wait_until(lambda: "try the vigenere angle" in session.sent, timeout=3)
+    assert "try the vigenere angle" in w.status()["steers"]
+    ok("operator steer is forwarded to the CLI and shows in status()")
+
+    # the worker tails the agent's screen and posts only the new output
+    assert await wait_until(lambda: any("inspect the files" in p for p in chan.posts), timeout=3)
+    ok("harness posts the agent's screen output as it appears")
+
+    # the real flag is ANNOUNCED but the agent KEEPS RUNNING (no halt by default),
+    # and the CDDC{...} placeholder is filtered out as a fake.
+    assert await wait_until(lambda: "CDDC{harness_solve}" in w.status()["candidates"], timeout=3)
+    assert any("CDDC{harness_solve}" in p and "CANDIDATE FLAG" in p for p in chan.posts), \
+        "real flag not announced"
+    assert "CDDC{...}" not in w.status()["candidates"], "placeholder wrongly treated as a flag"
+    assert ch.state == "solving", f"agent halted on a candidate (should keep running): {ch.state}"
+    ok("real flag announced + placeholder ignored, agent keeps running (no halt)")
+
+    # operator confirms with !solved -> stands down AND tears the session down
+    w.mark_solved()
+    await task
+    assert ch.state == "solved"
+    assert session.stopped, "harness session not stopped on solve"
+    ok("harness stands down on !solved and stops the CLI session")
+
+
+# --- scenario 5c: candidate flag CAN still halt-and-validate (opt-in) ------
+async def scenario_harness_halt() -> None:
+    print("scenario: CLI harness worker (halt_on_flag opt-in)")
+    from cddc.harness import FakeHarness
+    from cddc.harness_worker import HarnessWorker
+
+    ch = Challenge(id="h2", name="halt-warmup", category="crypto", thread_id=607)
+    chan = ConsoleChannel("crypto", echo=False)
+    session = FakeHarness(["working...\nfound it: CDDC{halt_solve}"], stay_alive=True)
+    w = HarnessWorker(
+        get_lane("crypto"), ch, chan,
+        id="wh2", name="crypto-h2", session=session, cli="claude",
+        max_minutes=999, poll_interval=0.02, halt_on_flag=True,
+    )
+    task = asyncio.create_task(w.run())
+    assert await wait_until(lambda: ch.state == "candidate", timeout=3), "did not halt on flag"
+    ok("halt_on_flag=True halts for validation on a candidate")
+    w.mark_solved()
+    await task
+    assert ch.state == "solved"
+    ok("halt path stands down on !solved")
+
+
 # --- scenario 6: sandbox routing + per-lane tool gating (no docker) -------
 class _FakeSandbox:
     """Stands in for cddc.sandbox.Sandbox - records the command, returns canned."""
@@ -324,6 +408,91 @@ async def scenario_sandbox_agent() -> None:
     assert not sb.started, "sandbox should be marked stopped after teardown"
     assert any("[sandbox] container `cddc-556` removed" in p for p in chan.posts), "sandbox teardown not posted"
     ok("agent tears the Docker sandbox down on !solved")
+
+
+# --- scenario 7b: real harness pipeline (docker + claude CLI in tmux) ------
+# Opt-in (CDDC_SIM_HARNESS=1): needs docker, the ctf-sandbox image, a host tmux,
+# and a real claude login on the host (~/.claude). It drives the ACTUAL claude
+# CLI on a real challenge, so it spends real subscription quota.
+async def scenario_harness_docker() -> None:
+    print("scenario: real harness pipeline (docker + claude CLI on a real challenge)")
+    import shutil
+
+    from cddc import config
+    from cddc.harness import TmuxHarness, credential_mounts
+    from cddc.harness_worker import HarnessWorker
+    from cddc.sandbox import Sandbox
+
+    src = os.path.expanduser(os.environ.get(
+        "CDDC_SIM_CHALLENGE",
+        "~/ctf/grey26/dist-elite_ball_knowledge/elite_ball_knowledge.zip",
+    ))
+    assert os.path.exists(src), f"challenge file not found: {src}"
+    max_minutes = float(os.environ.get("CDDC_SIM_HARNESS_MINUTES", "10"))
+
+    thread_id = 909
+    workdir = os.path.join("_files", f"sim{thread_id}")
+    os.makedirs(workdir, exist_ok=True)
+    dst = os.path.join(workdir, os.path.basename(src))
+    shutil.copy(src, dst)  # drop the distfile into the bind-mounted workdir
+
+    ch = Challenge(
+        id="ebk", name="elite_ball_knowledge", category="misc", thread_id=thread_id,
+        description=(
+            f"The distribution file {os.path.basename(src)} is in your working "
+            "directory. Unzip it if needed, analyze the challenge, and recover the "
+            "flag. Flags look like CDDC{...} - print it when you find it."
+        ),
+        files=[dst],
+    )
+    chan = ConsoleChannel("misc", echo=True)  # echo live so we watch it work
+    sandbox = Sandbox(
+        config.CDDC_SANDBOX_IMAGE, thread_id, workdir,
+        extra_mounts=credential_mounts(config.HARNESS_USER),
+    )
+    keys = [k.strip() for k in config.CLAUDE_STARTUP_KEYS.split(",") if k.strip()]
+    session = TmuxHarness(
+        "claude", sandbox, workdir,
+        launch_cmd=config.CLAUDE_CLI_CMD,
+        session_name=f"cddc-{thread_id}-claude",
+        user=config.HARNESS_USER,
+        startup_keys=keys,
+    )
+    w = HarnessWorker(
+        get_lane("misc"), ch, chan, id="whd", name="misc-harness",
+        session=session, cli="claude", max_minutes=max_minutes, poll_interval=5,
+    )
+    task = asyncio.create_task(w.run())
+
+    # "Runs properly" = claude cleared its startup gate and is actively working:
+    # it posted real CLI output (a `[claude] ...` delta) and reached a candidate
+    # flag, or is still grinding. We wait for substantive output, then for a
+    # candidate (or the worker to exit).
+    def has_cli_output() -> bool:
+        return any(p.startswith("[claude]") and len(p) > 40 for p in chan.posts)
+
+    assert await wait_until(has_cli_output, timeout=max_minutes * 60, interval=2), (
+        "claude never produced CLI output - it is likely stuck on a startup gate; "
+        f"last posts: {chan.posts[-3:]}"
+    )
+    ok("claude cleared the startup gate and is producing output")
+
+    # Candidate flags don't halt by default - let it run until it announces a real
+    # flag, the worker stands down on its own, or the budget elapses.
+    await wait_until(
+        lambda: w.status()["candidates"] or ch.state in ("killed", "solved", "needs_human"),
+        timeout=max_minutes * 60, interval=2,
+    )
+    cands = w.status()["candidates"]
+    print(f"  [info] state={ch.state}; steps={w.current_step}; candidates={cands}")
+    assert "CDDC{...}" not in cands, "placeholder leaked into candidates"
+    if cands:
+        ok(f"agent announced candidate flag(s) and kept running: {cands}")
+    else:
+        ok(f"agent ran the full pipeline (state={ch.state})")
+    w.cancel()  # stop the live agent + tear down the container
+    await task
+    ok("harness pipeline completed and tore down the container")
 
 
 # --- scenario 8: triage escalation (request -> deny -> continue -> solve) -
@@ -479,6 +648,10 @@ async def main() -> None:
     print()
     await scenario_agent()
     print()
+    await scenario_harness()
+    print()
+    await scenario_harness_halt()
+    print()
     await scenario_sandbox_and_gating()
     print()
     await scenario_escalation()
@@ -492,6 +665,11 @@ async def main() -> None:
     if os.environ.get("CDDC_SIM_DOCKER"):
         print()
         await scenario_sandbox_agent()
+    # The real harness scenario is opt-in (needs docker + ctf-sandbox + host tmux
+    # + a real claude login). It spends real subscription quota.
+    if os.environ.get("CDDC_SIM_HARNESS"):
+        print()
+        await scenario_harness_docker()
     print("\nALL CHECKS PASSED [done]  (no Discord token, no model key, no cost)")
 
 
