@@ -1,0 +1,28 @@
+# secrets - NEVER commit the real token
+.env
+*.env
+!.env.example
+cddc/.env
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# downloaded challenge distribution files
+_files/
+
+# vendored skill clone (if it ever lands here)
+vendor/
+
+# os / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
