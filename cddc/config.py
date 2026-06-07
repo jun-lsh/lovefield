@@ -115,10 +115,11 @@ HARNESS_CLI = _envs("CDDC_HARNESS_CLI", "claude").lower()  # "claude" | "codex"
 # sandbox container that provides isolation, not the CLI's own permission prompt.
 CLAUDE_CLI_CMD = _envs("CDDC_CLAUDE_CLI_CMD", "claude --dangerously-skip-permissions")
 CODEX_CLI_CMD = _envs("CDDC_CODEX_CLI_CMD", "codex --full-auto")
-# Comma-separated tmux key names sent before the kickoff to clear each CLI's
-# startup gate. claude's bypass-permissions warning needs Down (to "Yes, I
-# accept") then Enter; codex usually needs nothing.
-CLAUDE_STARTUP_KEYS = _envs("CDDC_CLAUDE_STARTUP_KEYS", "Down,Enter")
+# Comma-separated tmux key names sent (after the gate renders) to clear each
+# CLI's startup prompt. claude's trust-folder prompt DEFAULTS to "Yes, I trust
+# this folder", so a bare "Enter" accepts it - any arrow moves OFF the correct
+# option (Up even wraps 1->2). codex --full-auto usually needs nothing.
+CLAUDE_STARTUP_KEYS = _envs("CDDC_CLAUDE_STARTUP_KEYS", "Enter")
 CODEX_STARTUP_KEYS = _envs("CDDC_CODEX_STARTUP_KEYS", "")
 # Run the CLI as this container user ("" = root). Set to a non-root user (e.g.
 # "ctf") if your CLI refuses to run as root (claude --dangerously-skip-permissions
@@ -126,6 +127,11 @@ CODEX_STARTUP_KEYS = _envs("CDDC_CODEX_STARTUP_KEYS", "")
 HARNESS_USER = _envs("CDDC_HARNESS_USER", "")
 HARNESS_POLL = float(_envs("CDDC_HARNESS_POLL", "5"))          # screen-poll seconds
 HARNESS_MAX_MINUTES = float(_envs("CDDC_HARNESS_MAX_MINUTES", "20"))  # wall-clock cap
+# Compose the CLI's noisy TUI output into clean 1-line Discord updates via the
+# cheap churn model (the cheap model narrating the deep agent), every N seconds.
+# Off / no DeepSeek key -> post the cleaned screen deltas raw.
+HARNESS_SUMMARIZE = _envs("CDDC_HARNESS_SUMMARIZE", "1").lower() not in ("0", "false", "no", "")
+HARNESS_SUMMARIZE_SECS = float(_envs("CDDC_HARNESS_SUMMARIZE_SECS", "20"))
 # Share the host's claude/codex login (~/.claude, ~/.claude.json, ~/.codex) into
 # the container so the CLIs don't get stuck on login. On by default.
 HARNESS_SHARE_CREDS = _envs("CDDC_HARNESS_SHARE_CREDS", "1").lower() not in ("0", "false", "no", "")
@@ -151,6 +157,28 @@ ESCALATION_BUDGET_MULT = float(_envs("CDDC_ESCALATION_BUDGET_MULT", "3"))
 # pwn/rev binaries. Requires the bot to run as a docker-capable user.
 CDDC_SANDBOX = _envs("CDDC_SANDBOX", "local").lower()
 CDDC_SANDBOX_IMAGE = _envs("CDDC_SANDBOX_IMAGE", "ctf-sandbox")
+
+# Docker-OUT-of-docker: host daemon socket bound into a worker's sandbox so the
+# agent inside can stand up service containers (a `docker compose up` challenge,
+# a target box). It is host-root, so it is NOT handed out casually:
+#   - triage NEVER gets it (a throwaway triage container that spins a service then
+#     hands off would just waste the spin-up). Triage that hits a needs-a-box
+#     challenge SELF-ESCALATES; the respawned specialist gets the socket. That
+#     near-immediate handoff is the intended path, not arming triage.
+#   - any non-triage role (specialist / deep / windows) gets it.
+# Set CDDC_DOCKER_SOCK="" to disable everywhere; CDDC_TRIAGE_SOCKET=1 to also arm
+# triage (the "exception" knob, off by default).
+DOCKER_SOCK = _envs("CDDC_DOCKER_SOCK", "/var/run/docker.sock")
+TRIAGE_SOCKET = _envs("CDDC_TRIAGE_SOCKET", "0").lower() in ("1", "true", "yes")
+
+
+def docker_sock_for_role(role: str) -> str:
+    """Socket path this role's sandbox should bind, or "" for none."""
+    if not DOCKER_SOCK:
+        return ""
+    if (role or "").strip().lower() == "triage" and not TRIAGE_SOCKET:
+        return ""
+    return DOCKER_SOCK
 
 def category_for_channel(channel_name: str) -> str:
     key = (channel_name or "").strip().lower().lstrip("#")

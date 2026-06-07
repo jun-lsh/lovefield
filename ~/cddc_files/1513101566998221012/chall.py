@@ -1,0 +1,27 @@
+from Crypto.Util.number import getPrime, isPrime, bytes_to_long
+
+def getPrimes(a, b):
+    while True:
+        p = getPrime(256)
+        q = a*p + b
+        if isPrime(q):
+            return p, q
+
+a = getPrime(16)
+b = 2 * getPrime(16)
+p, q = getPrimes(a, b)
+n = p * q
+m = bytes_to_long(b'NCO26{REDACTED}')
+e = 65537
+c = pow(m, e, n)
+
+print(f'{n = }')
+print(f'{a = }')
+print(f'{b = }')
+print(f'{c = }')
+"""
+n = 294312631336817645497301082322154554240169094802464958727391665069791072117766147688663795779102482415529910414666073067471219835152624493177079306762140706831
+a = 35317
+b = 66854
+c = 207223624788194872360942285358435084695571853530695552156870002418526375800472563533912325138458477569873878816555043575388996977720183144666404444478261365640
+"""

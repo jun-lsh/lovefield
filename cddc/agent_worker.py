@@ -19,7 +19,7 @@ from .channel import Channel
 from .lanes.base import Lane
 from .models import ModelClient, Reply, assistant_message
 from .tools import Toolbox, tool_specs
-from .worker import Worker, summary
+from .worker import Worker, is_placeholder_flag, summary
 
 # Per-agent alignment lives in markdown, NOT here - teammates edit cddc/skills/
 # without touching Python. The system prompt is STACKED from four parts so the
@@ -157,7 +157,8 @@ class AgentWorker(Worker):
         if self.sandbox is not None:
             try:
                 await self.sandbox.start()
-                await self._post(f"[sandbox] container `{self.sandbox.name}` up")
+                sock = " + docker socket" if getattr(self.sandbox, "docker_sock", None) else ""
+                await self._post(f"[sandbox] container `{self.sandbox.name}` up{sock}")
             except Exception as e:
                 await self._post(f"[sandbox] failed to start: {e!r} - standing down", force=True)
                 return await self._exit_killed()
@@ -254,9 +255,20 @@ class AgentWorker(Worker):
             escalate: dict | None = None
             for tc in reply.tool_calls:
                 if tc.name == "submit_flag":
-                    submitted = str(tc.arguments.get("flag", "")).strip()
-                    messages.append({"role": "tool", "tool_call_id": tc.id,
-                                     "content": f"flag recorded: {submitted}"})
+                    cand = str(tc.arguments.get("flag", "")).strip()
+                    if not cand or is_placeholder_flag(cand):
+                        # Reject empty / format-placeholder submits instead of
+                        # halting the thread on a non-flag (same hygiene the
+                        # harness applies to its .cddc_solution sentinel).
+                        messages.append({"role": "tool", "tool_call_id": tc.id,
+                                         "content": "that is not a real flag (empty or a "
+                                         "format placeholder) - keep working and submit the "
+                                         "actual verified flag."})
+                        await self._post(f"[{self.current_step}] ignored non-flag submit: {cand!r}")
+                    else:
+                        submitted = cand
+                        messages.append({"role": "tool", "tool_call_id": tc.id,
+                                         "content": f"flag recorded: {submitted}"})
                     continue
                 if tc.name == "request_escalation":
                     escalate = {

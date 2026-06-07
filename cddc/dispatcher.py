@@ -61,9 +61,11 @@ class Dispatcher:
         kind: str = "dummy",
         model=None,
         cli: str | None = None,
+        summarizer=None,
         autostart: bool = True,
         role_override: str | None = None,
         budget_mult: float = 1.0,
+        docker_sock: str | None = None,
     ) -> Worker:
         """Build a worker for the challenge, register it, and start its loop.
 
@@ -84,11 +86,6 @@ class Dispatcher:
 
         if kind == "agent":
             workdir = os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id))
-            sandbox = None
-            if config.CDDC_SANDBOX == "docker":
-                from .sandbox import Sandbox
-
-                sandbox = Sandbox(config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir)
             # Role drives which skills/roles/<role>.md doctrine loads. Thin-
             # triage-always by default; a specialist-mode lane (deep_solver,
             # windows) gets the deep-solver doctrine instead. Escalation / !lane
@@ -96,6 +93,17 @@ class Dispatcher:
             role = role_override or (
                 "specialist" if lane.default_mode == "specialist" else "triage"
             )
+            sandbox = None
+            if config.CDDC_SANDBOX == "docker":
+                from .sandbox import Sandbox
+
+                # Socket is a non-triage privilege (see config.docker_sock_for_role);
+                # an explicit `docker_sock` arg overrides the role default.
+                sock = docker_sock if docker_sock is not None else config.docker_sock_for_role(role)
+                sandbox = Sandbox(
+                    config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
+                    docker_sock=sock or None,
+                )
             worker: Worker = AgentWorker(
                 lane,
                 chall,
@@ -127,10 +135,17 @@ class Dispatcher:
             # Share the host's claude/codex login into the container so the CLI is
             # already authenticated (otherwise it stalls on the login screen).
             creds = credential_mounts(config.HARNESS_USER) if config.HARNESS_SHARE_CREDS else []
+            role = role_override or (
+                "specialist" if lane.default_mode == "specialist" else "triage"
+            )
+            # Socket is a non-triage privilege (see config.docker_sock_for_role);
+            # an explicit `docker_sock` arg overrides the role default.
+            sock = docker_sock if docker_sock is not None else config.docker_sock_for_role(role)
             # The container is MANDATORY here - the CLI runs inside it via
             # `docker exec`, so we always build a Sandbox (ignoring CDDC_SANDBOX).
             sandbox = Sandbox(
-                config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir, extra_mounts=creds
+                config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
+                extra_mounts=creds, docker_sock=sock or None,
             )
             session = TmuxHarness(
                 which, sandbox, workdir,
@@ -138,9 +153,6 @@ class Dispatcher:
                 session_name=f"cddc-{chall.thread_id}-{which}",
                 user=config.HARNESS_USER,
                 startup_keys=startup_keys,
-            )
-            role = role_override or (
-                "specialist" if lane.default_mode == "specialist" else "triage"
             )
             worker = HarnessWorker(
                 lane,
@@ -159,6 +171,8 @@ class Dispatcher:
                 checkpoint_every=config.AGENT_CHECKPOINT,
                 halt_on_flag=config.HARNESS_HALT_ON_FLAG,
                 flag_blacklist=config.FLAG_BLACKLIST,
+                summarizer=summarizer,
+                summarize_every=config.HARNESS_SUMMARIZE_SECS,
             )
         else:
             worker = DummyWorker(

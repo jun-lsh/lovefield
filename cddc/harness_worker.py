@@ -28,12 +28,45 @@ from .challenge import Challenge
 from .channel import Channel
 from .harness import HarnessSession
 from .lanes.base import Lane
-from .worker import Worker, summary
+from .worker import FLAG_RE, Worker, declared_flag, extract_flag, summary
 
-# A flag-shaped token printed anywhere on the agent's screen.
-_FLAG_RE = re.compile(r"CDDC\{[^}\n]*\}")
-# Always-fake tokens: the placeholder we (and the skills docs) use for "a flag".
-_PLACEHOLDER_FLAGS = {"CDDC{...}", "CDDC{…}", "CDDC{FLAG}", "CDDC{flag}"}
+# Flag validation (what counts as a real flag) lives in worker.py so AgentWorker
+# and HarnessWorker agree - see worker.extract_flag / is_placeholder_flag.
+
+# --- TUI cleanup: turn a raw claude/codex screen capture into readable text ---
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+_BOX_CHARS = set("─│╭╮╰╯┌┐└┘├┤┬┴┼━┃┏┓┗┛═║╔╗╚╝▌▐█▏▕▶▲▼◀◆●○•✻✶✽✢·»❯⏵⏺⎿◢◣◤◥")
+# Whole lines that are pure TUI chrome (status bar / banner / spinner) - dropped.
+_CHROME_RE = re.compile(
+    r"claude code v\d|welcome back|bypass permissions|esc to interrupt|"
+    r"esc to cancel|enter to confirm|shift\+tab|tips for getting|for shortcuts|"
+    r"churning|thinking…|[↑↓] .*tokens",
+    re.IGNORECASE,
+)
+
+
+def _clean(raw: str) -> str:
+    """Reduce a TUI screen capture to readable text.
+
+    Strips ANSI escapes + box-drawing glyphs, drops status-bar/banner/spinner
+    chrome, and collapses blank runs + adjacent duplicate lines. Best-effort -
+    the bigger win is the (model) summarizer that will sit on top; this makes the
+    raw stream legible and gives that summarizer clean input.
+    """
+    out: list[str] = []
+    for line in _ANSI_RE.sub("", raw or "").splitlines():
+        line = "".join(ch for ch in line if ch not in _BOX_CHARS).strip()
+        if not line:
+            if out and out[-1] == "":
+                continue
+            out.append("")
+            continue
+        if _CHROME_RE.search(line):
+            continue
+        if out and out[-1] == line:  # dedup adjacent identical lines
+            continue
+        out.append(line)
+    return "\n".join(out).strip()
 
 
 class HarnessWorker(Worker):
@@ -56,6 +89,8 @@ class HarnessWorker(Worker):
         checkpoint_every: int = 8,
         halt_on_flag: bool = False,
         flag_blacklist: list[str] | None = None,
+        summarizer=None,
+        summarize_every: float = 20.0,
     ) -> None:
         super().__init__(
             lane, chall, channel,
@@ -70,12 +105,22 @@ class HarnessWorker(Worker):
         self.checkpoint_every = checkpoint_every
         # Candidate flags announce but don't block by default; flip to halt+validate.
         self.halt_on_flag = halt_on_flag
+        # Optional cheap ModelClient that turns the raw TUI output into a clean
+        # 1-line Discord update (the cheap model narrating the deep agent). None
+        # -> post the cleaned screen deltas directly (no composition).
+        self.summarizer = summarizer
+        self.summarize_every = summarize_every
+        self._sum_buf: list[str] = []   # cleaned output awaiting summarization
+        self._last_summary = 0.0        # monotonic ts of last summary emit
+        self._summary_tokens = 0
         self._last_capture = ""        # for tail-diffing the agent's screen
-        self._seen_flags: set[str] = set()   # already-announced real flags (dedup)
-        self._candidates: list[str] = []     # real flags found, in order
-        # Maintained blacklist of fakes: built-in placeholders + operator-supplied
-        # ones + (seeded in run()) the prompt's own example tokens.
-        self._flag_blacklist: set[str] = set(_PLACEHOLDER_FLAGS) | set(flag_blacklist or [])
+        self._seen_flags: set[str] = set()   # declared flags already announced (dedup)
+        self._candidates: list[str] = []     # declared flags, in order
+        self._spotted: set[str] = set()      # unconfirmed on-screen tokens (trace only)
+        # Operator-supplied fakes + (seeded in run()) the prompt's own example
+        # tokens. Format placeholders are handled by worker.is_placeholder_flag,
+        # so they don't need to be listed here.
+        self._flag_blacklist: set[str] = set(flag_blacklist or [])
         self._cap_secs = max(1.0, max_minutes * 60.0)  # grows on !continue
         self._started_at = 0.0
 
@@ -84,6 +129,8 @@ class HarnessWorker(Worker):
         s["cli"] = self.cli
         s["role"] = self.role
         s["candidates"] = list(self._candidates)
+        if self.summarizer is not None:
+            s["summary_tokens"] = self._summary_tokens
         return s
 
     def trace_text(self) -> str:
@@ -104,7 +151,7 @@ class HarnessWorker(Worker):
         # The prompt + skills docs spell out the flag FORMAT (and may give example
         # flags); blacklist every flag-shaped token in them so we never announce
         # the agent's own instructions back as a candidate.
-        self._flag_blacklist.update(_FLAG_RE.findall(prompt))
+        self._flag_blacklist.update(FLAG_RE.findall(prompt))
         try:
             await self.session.start(prompt)
             await self._post(f"[harness] `{self.cli}` session up - watching")
@@ -167,46 +214,67 @@ class HarnessWorker(Worker):
                 self.chall.state = "solving"
                 continue
 
-            # capture the agent's screen, post only the new tail
-            new = self._delta(await self.session.capture())
-            if new.strip():
+            # capture the agent's screen, clean off TUI chrome
+            new = _clean(self._delta(await self.session.capture()))
+            if new:
                 self.current_step += 1
-                self.findings.append(new.strip()[:200])
-                # No hard truncation - the channel splits long posts. Cap only to
-                # bound a pathological dump.
-                await self._post(f"[{self.cli}] {new.strip()[:8000]}")
-                if self.checkpoint_every and self.current_step % self.checkpoint_every == 0:
-                    await self._post(self._checkpoint())
+                self.findings.append(new[:200])
+                # On-screen tokens are UNCONFIRMED - the agent prints test/example
+                # flags too (the canary false-positive). Record for !trace only;
+                # never announce. The sentinel file is the sole authoritative path.
+                tok = self._extract_flag(new, skip_seen=False)
+                if tok and tok not in self._spotted and tok not in self._seen_flags:
+                    self._spotted.add(tok)
+                    self.findings.append(f"unconfirmed token on screen: {tok}")
+                if self.summarizer is not None:
+                    self._sum_buf.append(new)  # composed into a line on the cadence below
+                else:
+                    # No summarizer: post the cleaned delta directly. Channel splits
+                    # long posts; cap only to bound a pathological dump.
+                    await self._post(f"[{self.cli}] {new[:4000]}")
+                    if self.checkpoint_every and self.current_step % self.checkpoint_every == 0:
+                        await self._post(self._checkpoint())
 
-                flag = self._find_flag(new)
-                if flag:
-                    self._candidates.append(flag)
-                    self.findings.append(f"candidate flag: {flag}")
-                    if self.halt_on_flag:
-                        # Opt-in classic behavior: HALT and wait for validation.
-                        kind = await self._halt(
-                            summary(f"[done] **{self.name}** candidate",
-                                    self.findings[-6:], flag=flag),
-                            candidate=True,
-                        )
-                        if kind == "cancelled":
-                            return await self._exit_killed()
-                        if kind == "solved":
-                            return await self._exit_solved()
-                        # !continue: reason folded as a steer; tell the agent.
-                        self.chall.state = "solving"
-                        await self.session.send(
-                            f"The operator rejected the flag {flag}. Re-examine and keep going."
-                        )
-                    else:
-                        # Default: announce (pings #status via the CANDIDATE FLAG
-                        # block) but keep the agent running. Operator stands it down
-                        # with !solved / !kill if it's the real one.
-                        await self.channel.post(summary(
-                            f"[candidate] **{self.name}** found a flag "
-                            f"(still running - `!solved` to confirm, `!kill` to stop)",
-                            self.findings[-6:], flag=flag,
-                        ))
+            # cadence: have the cheap model compose ONE clean line from the buffer
+            if self.summarizer is not None and self._sum_buf:
+                if time.monotonic() - self._last_summary >= self.summarize_every:
+                    await self._emit_summary()
+
+            # AUTHORITATIVE flag declaration: the .cddc_solution sentinel the agent
+            # writes once it has VERIFIED the real flag (see harness._KICKOFF). The
+            # agent declared it explicitly, so we trust ANY prefix (NCO26{...} etc.)
+            # via declared_flag, not the CDDC-shaped screen scrape.
+            declared = declared_flag(await self.session.read_solution())
+            if declared and declared not in self._seen_flags:
+                self._seen_flags.add(declared)
+                self._candidates.append(declared)
+                self.findings.append(f"declared flag: {declared}")
+                if self.halt_on_flag:
+                    # Opt-in classic behavior: HALT and wait for validation.
+                    kind = await self._halt(
+                        summary(f"[done] **{self.name}** declared a flag",
+                                self.findings[-6:], flag=declared),
+                        candidate=True,
+                    )
+                    if kind == "cancelled":
+                        return await self._exit_killed()
+                    if kind == "solved":
+                        return await self._exit_solved()
+                    # !continue: tell the agent to overwrite the sentinel when right.
+                    self.chall.state = "solving"
+                    await self.session.send(
+                        f"The operator rejected {declared}. Keep going; overwrite "
+                        f".cddc_solution only once you have the correct flag."
+                    )
+                else:
+                    # Default: announce (pings #status via the CANDIDATE FLAG block)
+                    # but keep the agent running. Operator stands it down with
+                    # !solved / !kill if it's the real one.
+                    await self.channel.post(summary(
+                        f"[candidate] **{self.name}** declared a flag "
+                        f"(still running - `!solved` to confirm, `!kill` to stop)",
+                        self.findings[-6:], flag=declared,
+                    ))
 
             # the CLI exited on its own (finished, crashed, or hit its own cap)
             if not await self.session.alive():
@@ -231,6 +299,44 @@ class HarnessWorker(Worker):
             await asyncio.sleep(self.poll_interval)
 
     # --- helpers ------------------------------------------------------------
+    async def _emit_summary(self) -> None:
+        """Compose the buffered raw output into ONE clean Discord line and post it."""
+        buf = "\n".join(self._sum_buf).strip()
+        self._sum_buf = []
+        self._last_summary = time.monotonic()
+        if not buf:
+            return
+        line = await self._summarize(buf)
+        if line:
+            await self._post(f"[{self.cli}] {line}")
+
+    async def _summarize(self, text: str) -> str:
+        """Cheap model turns raw agent terminal output into a 1-line status.
+
+        The cheap churn model narrating the expensive CLI agent. Best-effort: on
+        any error fall back to the last cleaned line so the feed is never silent.
+        Never raises into the watch loop.
+        """
+        sys_prompt = (
+            "You narrate a CTF solving agent's progress for a team Discord feed. "
+            "Given the agent's recent terminal output, reply with ONE concise line "
+            "(<=200 chars, present tense): what it is doing, what it found, or where "
+            "it is stuck. No preamble, no markdown headers. If nothing meaningful "
+            "happened, reply exactly: working."
+        )
+        msgs = [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": text[-6000:]},
+        ]
+        try:
+            reply = await self.summarizer.chat(msgs, [])
+            self._summary_tokens += getattr(reply, "tokens", 0) or 0
+            return (reply.content or "").strip().replace("\n", " ")[:280]
+        except Exception as e:
+            await self._post(f"[summarizer] failed: {e!r} (posting raw tail)")
+            tail = [ln for ln in text.splitlines() if ln.strip()]
+            return tail[-1][:280] if tail else ""
+
     def _delta(self, text: str) -> str:
         """The new tail since the last capture (append-mostly scrollback)."""
         if text == self._last_capture:
@@ -242,17 +348,18 @@ class HarnessWorker(Worker):
         self._last_capture = text
         return new
 
-    def _find_flag(self, text: str) -> str | None:
-        for m in _FLAG_RE.finditer(text):
-            flag = m.group(0)
-            inner = flag[len("CDDC{"):-1]
-            if not inner.strip(" .\t…"):       # empty / ellipsis placeholder
-                continue
-            if flag in self._flag_blacklist or flag in self._seen_flags:
-                continue
-            self._seen_flags.add(flag)
-            return flag
-        return None
+    def _extract_flag(self, text: str, *, skip_seen: bool = True) -> str | None:
+        """First REAL flag in `text` via the shared worker.extract_flag.
+
+        Does NOT mark it seen - callers decide: the authoritative sentinel path
+        records it in _seen_flags + _candidates; the unconfirmed on-screen path
+        tracks it in _spotted instead (trace only, never announced).
+        """
+        return extract_flag(
+            text,
+            blacklist=self._flag_blacklist,
+            seen=self._seen_flags if skip_seen else (),
+        )
 
     def _checkpoint(self) -> str:
         """Consolidated 'what's come out so far' rollup (no extra cost)."""

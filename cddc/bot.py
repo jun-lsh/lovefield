@@ -40,6 +40,7 @@ from .config import (
     DOWNLOAD_DIR,
     ESCALATION_BUDGET_MULT,
     HARNESS_CLI,
+    HARNESS_SUMMARIZE,
     IGNORE_CHANNELS,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
@@ -90,6 +91,16 @@ elif _model is not None:
     _KIND = "agent"
 else:
     _KIND = "dummy"
+
+# Cheap model that narrates the CLI harness's noisy TUI into clean 1-line Discord
+# updates. Always DeepSeek (cheap) regardless of the harness's own provider; None
+# -> the harness posts cleaned-but-raw screen deltas instead.
+_summarizer = None
+if _KIND == "harness" and HARNESS_SUMMARIZE:
+    if DEEPSEEK_API_KEY:
+        _summarizer = DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL)
+    else:
+        print("CDDC_HARNESS_SUMMARIZE=1 but DEEPSEEK_API_KEY is empty -> harness posts raw output")
 
 intents = discord.Intents.default()
 intents.message_content = True  # PRIVILEGED - enable it in the Developer Portal
@@ -497,7 +508,7 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
             new_chall, channel,
             lane_override=lane_override,
             on_candidate=_candidate_hook,
-            kind=_KIND, model=_model, cli=HARNESS_CLI,
+            kind=_KIND, model=_model, cli=HARNESS_CLI, summarizer=_summarizer,
             role_override="specialist",
             budget_mult=ESCALATION_BUDGET_MULT,
         )
@@ -556,7 +567,7 @@ async def cmd_start(ctx: commands.Context, *, description: str = "") -> None:
     )
     worker = await dispatcher.dispatch(
         chall, DiscordChannel(thread, bot), on_candidate=_candidate_hook,
-        kind=_KIND, model=_model, cli=HARNESS_CLI,
+        kind=_KIND, model=_model, cli=HARNESS_CLI, summarizer=_summarizer,
     )
 
     note = f"downloaded {len(local)} file(s)" if local else "no attachments"

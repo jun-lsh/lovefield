@@ -33,14 +33,26 @@ class Sandbox:
         *,
         mount: str = "/challenge",
         extra_mounts: list[str] | None = None,
+        docker_sock: str | None = None,
     ) -> None:
         self.image = image
+        self.thread_id = thread_id
         self.host_workdir = host_workdir
         self.mount = mount
         # Extra `-v` specs appended to `docker run` (e.g. host credential files
         # for the harness CLIs). Each is a full "src:dst[:opts]" string.
         self.extra_mounts = list(extra_mounts or [])
+        # Host docker socket to bind in (docker-OUT-of-docker). When set, the
+        # agent inside can drive the HOST daemon - anything it `docker run`s is a
+        # SIBLING of this sandbox, not a child, so a service it stands up survives
+        # this sandbox's teardown and is reachable by a handed-off worker. The
+        # flip side: those siblings leak unless we reap them (see teardown), so we
+        # scope them by the COMPOSE_PROJECT_NAME / label below. Gated to non-triage
+        # roles by the dispatcher - mounting the socket is host-root, not casual.
+        self.docker_sock = docker_sock
         self.name = f"cddc-{thread_id}"
+        # Label/compose scope for sibling containers the agent spins via the socket.
+        self.scope = f"cddc-{thread_id}"
         self._started = False
 
     @property
@@ -56,21 +68,38 @@ class Sandbox:
         # Drop a stale container of the same name (e.g. from a crashed prior run).
         # TODO: decide when to delete. it could contain solve scripts / important stuff
         await self._docker("stop", self.name)
-        mount_args: list[str] = ["-v", f"{host_abs}:{self.mount}:Z"]
-        for spec in self.extra_mounts:
-            mount_args += ["-v", spec]
-        rc, out = await self._docker(
-            "run", "-d", "--rm",
-            "--name", self.name,
-            "-w", self.mount,
-            *mount_args,
-            self.image,
-            "sleep", "infinity",
-        )
+        rc, out = await self._docker(*self._run_argv(host_abs))
         if rc != 0:
             # Leave _started False; exec() will return a clear tool error.
             raise RuntimeError(f"docker run failed (rc={rc}): {out.strip()[:500]}")
         self._started = True
+
+    def _run_argv(self, host_abs: str) -> list[str]:
+        """Build the `docker run` argv. Split out so the sim can assert on it
+        (mounts/socket) without actually launching a container."""
+        mount_args: list[str] = ["-v", f"{host_abs}:{self.mount}:Z"]
+        for spec in self.extra_mounts:
+            mount_args += ["-v", spec]
+        sock_args: list[str] = []
+        if self.docker_sock:
+            # Bind the host daemon socket in, and pre-seed COMPOSE_PROJECT_NAME +
+            # a thread label so any `docker compose up` the agent runs is scoped to
+            # this challenge and reapable on teardown. (Manual `docker run`s should
+            # carry `--label cddc.thread=<id>`; CDDC_THREAD is exported for that.)
+            sock_args = [
+                "-v", f"{self.docker_sock}:{self.docker_sock}",
+                "-e", f"COMPOSE_PROJECT_NAME={self.scope}",
+                "-e", f"CDDC_THREAD={self.thread_id}",
+            ]
+        return [
+            "run", "-d", "--rm",
+            "--name", self.name,
+            "-w", self.mount,
+            *mount_args,
+            *sock_args,
+            self.image,
+            "sleep", "infinity",
+        ]
 
     async def exec(self, command: str, timeout: int) -> str:
         """Run `command` via `sh -c` inside the container. Never raises."""
@@ -97,7 +126,30 @@ class Sandbox:
             await self._docker("stop", self.name)
         except Exception:
             pass
+        if self.docker_sock:
+            await self._reap_children()
         self._started = False
+
+    async def _reap_children(self) -> None:
+        """Remove sibling containers the agent spun up via the mounted socket.
+
+        Scoped by label so we never touch another challenge's containers: compose
+        tags everything it creates with `com.docker.compose.project`, and manual
+        runs are asked to set `cddc.thread`. Best-effort; swallow everything.
+        """
+        for label in (
+            f"com.docker.compose.project={self.scope}",
+            f"cddc.thread={self.thread_id}",
+        ):
+            try:
+                rc, out = await self._docker(
+                    "ps", "-aq", "--filter", f"label={label}"
+                )
+                ids = [x for x in out.split() if x] if rc == 0 else []
+                if ids:
+                    await self._docker("rm", "-f", *ids)
+            except Exception:
+                pass
 
     async def _docker(self, *args: str, timeout: int | None = None) -> tuple[int, str]:
         """Run `docker <args>`; return (returncode, combined stdout+stderr text).

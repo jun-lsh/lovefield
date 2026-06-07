@@ -11,11 +11,65 @@ Nothing here imports `discord` - it only ever touches a `Channel`.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 
 from .challenge import Challenge
 from .channel import Channel
 from .lanes.base import Lane
+
+
+# --- flag hygiene (shared by EVERY worker) ---------------------------------
+# What counts as a real flag, defined once so the AgentWorker (submit_flag tool)
+# and the HarnessWorker (.cddc_solution sentinel) agree. FORMAT-AGNOSTIC: any CTF
+# prefix - CDDC{...}, NCO26{...}, flag{...} - not pinned to one comp's prefix. A
+# real flag is flag-shaped, non-empty, not a format placeholder, not blacklisted.
+FLAG_RE = re.compile(r"[A-Za-z0-9_]{2,20}\{[^}\n]{1,256}\}")
+PLACEHOLDER_FLAGS = {"CDDC{...}", "CDDC{…}", "CDDC{FLAG}", "CDDC{flag}"}
+_FLAG_SHAPE_RE = re.compile(r"^[A-Za-z0-9_]{2,20}\{([^}\n]*)\}$")
+
+
+def is_placeholder_flag(flag: str) -> bool:
+    """True for empty / dots-only / generic 'FLAG' placeholders (any prefix)."""
+    flag = (flag or "").strip()
+    if flag in PLACEHOLDER_FLAGS:
+        return True
+    m = _FLAG_SHAPE_RE.match(flag)
+    if not m:
+        return False
+    inner = m.group(1).strip(" .\t…")
+    return inner == "" or inner.lower() == "flag"
+
+
+def extract_flag(text: str, *, blacklist=(), seen=()) -> str | None:
+    """First REAL flag in `text`, or None. Skips placeholders / blacklist / seen."""
+    for m in FLAG_RE.finditer(text or ""):
+        flag = m.group(0)
+        if is_placeholder_flag(flag) or flag in blacklist or flag in seen:
+            continue
+        return flag
+    return None
+
+
+def declared_flag(text: str) -> str | None:
+    """The flag an agent EXPLICITLY declared (e.g. wrote to the sentinel file).
+
+    Format-agnostic and trusting: the first braced flag token of any prefix, or -
+    if there's no braces - the stripped content when it's a single short token (an
+    unbraced flag). None for empty / placeholder / prose-with-no-flag. Unlike
+    extract_flag this isn't scraping noisy output: the agent chose to write
+    exactly this, so we don't constrain the prefix.
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    m = FLAG_RE.search(text)
+    cand = m.group(0) if m else text.splitlines()[0].strip()
+    if is_placeholder_flag(cand):
+        return None
+    if not m and (len(cand) > 200 or " " in cand):
+        return None  # prose with no braced flag - not a clean declaration
+    return cand
 
 
 def summary(

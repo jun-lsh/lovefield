@@ -1,0 +1,39 @@
+#!/bin/sh
+# cddc-docker-shim - shadows `docker` inside the ctf-sandbox container.
+#
+# Why: when the host daemon socket is bound into a specialist sandbox, anything
+# the agent `docker run`s is a SIBLING on the host daemon (docker-out-of-docker).
+# `docker compose up` scopes its containers under COMPOSE_PROJECT_NAME so the host
+# can reap them per-challenge, but a bare `docker run` has no such scope and would
+# LEAK after the challenge ends. This shim transparently injects
+# `--label cddc.thread=$CDDC_THREAD` on container-creating verbs so the host's
+# Sandbox._reap_children() can clean them up. Everything else passes straight
+# through to the real client, untouched.
+#
+# Installed by Dockerfile.sandbox: the real static client is moved to
+# /usr/local/bin/docker.real and this script takes the `docker` name on PATH.
+# When CDDC_THREAD is unset (no socket / not our context) it is a no-op wrapper,
+# so the image's `docker` behaves normally outside the fleet.
+
+real=/usr/local/bin/docker.real
+
+if [ -n "$CDDC_THREAD" ]; then
+    label="cddc.thread=$CDDC_THREAD"
+    case "$1 $2" in
+        "run "* | "create "*)
+            # `docker run ...` / `docker create ...`
+            verb="$1"
+            shift
+            exec "$real" "$verb" --label "$label" "$@"
+            ;;
+        "container run" | "container create")
+            # `docker container run ...` / `docker container create ...`
+            sub="$1"
+            verb="$2"
+            shift 2
+            exec "$real" "$sub" "$verb" --label "$label" "$@"
+            ;;
+    esac
+fi
+
+exec "$real" "$@"

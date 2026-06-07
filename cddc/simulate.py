@@ -211,6 +211,43 @@ async def scenario_agent() -> None:
     ok("agent stands down on !solved")
 
 
+# --- scenario 5a2: agent flag hygiene (reject placeholder submit_flag) -----
+async def scenario_agent_flag_hygiene() -> None:
+    print("scenario: agent flag hygiene (shared with the harness)")
+    ch = Challenge(id="fh", name="hyg", category="crypto", thread_id=558,
+                   description="submit a placeholder, then the real flag")
+    chan = ConsoleChannel("crypto", echo=False)
+    script = [
+        Reply(content="submitting the format placeholder by mistake", tokens=10,
+              tool_calls=[ToolCall("t1", "submit_flag", {"flag": "CDDC{...}"})]),
+        Reply(content="ok the verified one", tokens=10,
+              tool_calls=[ToolCall("t2", "submit_flag", {"flag": "CDDC{real_one}"})]),
+    ]
+    w = AgentWorker(
+        get_lane("crypto"), ch, chan, id="wfh", name="crypto-fh",
+        model=FakeModel(script), workdir=os.path.join("_files", "sim558"),
+        max_steps=40, max_tokens=200_000, shell_timeout=10,
+    )
+    task = asyncio.create_task(w.run())
+
+    # a placeholder submit is rejected (not halted on) - same hygiene as the harness
+    assert await wait_until(
+        lambda: any("ignored non-flag submit" in p for p in chan.posts), timeout=5
+    )
+    ok("placeholder submit_flag is rejected, not treated as a candidate")
+
+    # the real flag then halts as a candidate for validation
+    assert await wait_until(lambda: ch.state == "candidate", timeout=5)
+    assert any("CDDC{real_one}" in p and "CANDIDATE FLAG" in p for p in chan.posts), \
+        "real flag not announced as candidate"
+    ok("real submit_flag halts as a candidate")
+
+    w.mark_solved()
+    await task
+    assert ch.state == "solved"
+    ok("agent stands down on !solved")
+
+
 # --- scenario 5b: CLI harness worker (fake tmux session, no docker/key) ---
 async def scenario_harness() -> None:
     print("scenario: CLI harness worker (fake tmux session)")
@@ -222,16 +259,14 @@ async def scenario_harness() -> None:
         description="run a real CLI agent in tmux",
     )
     chan = ConsoleChannel("crypto", echo=False)
-    # Cumulative pane snapshots (append-mostly scrollback). The placeholder line
-    # echoes the flag FORMAT (as the real CLI does) and must be IGNORED; the real
-    # flag on the last frame must be announced.
-    captures = [
-        "$ claude\nthinking about the challenge...",
-        "$ claude\nthinking...\nthe flag will look like CDDC{...}, let me inspect the files",
-        "$ claude\nthinking...\nthe flag will look like CDDC{...}, let me inspect the files\n"
-        "found it: CDDC{harness_solve}",
-    ]
-    session = FakeHarness(captures, stay_alive=True)
+    # Cumulative pane snapshots (append-mostly scrollback). They contain BOTH a
+    # placeholder (CDDC{...}, the format echoed in the prompt) AND a test/canary
+    # flag the agent printed while working - NEITHER may be announced. Only the
+    # .cddc_solution sentinel (set below) is an authoritative declaration.
+    f1 = "$ claude\nthinking about the challenge..."
+    f2 = f1 + "\nthe flag will look like CDDC{...}, let me inspect the files"
+    f3 = f2 + "\nset a test canary: wrote CDDC{test_canary}\ninspecting the files"
+    session = FakeHarness([f1, f2, f3], stay_alive=True)
     w = HarnessWorker(
         get_lane("crypto"), ch, chan,
         id="wh", name="crypto-h", session=session, cli="claude",
@@ -251,18 +286,29 @@ async def scenario_harness() -> None:
     assert "try the vigenere angle" in w.status()["steers"]
     ok("operator steer is forwarded to the CLI and shows in status()")
 
-    # the worker tails the agent's screen and posts only the new output
-    assert await wait_until(lambda: any("inspect the files" in p for p in chan.posts), timeout=3)
+    # the worker tails the agent's screen and posts the cleaned output
+    assert await wait_until(lambda: any("inspecting the files" in p for p in chan.posts), timeout=3)
     ok("harness posts the agent's screen output as it appears")
 
-    # the real flag is ANNOUNCED but the agent KEEPS RUNNING (no halt by default),
-    # and the CDDC{...} placeholder is filtered out as a fake.
+    # neither the placeholder NOR the on-screen test canary becomes a candidate;
+    # the canary is recorded as an unconfirmed token (trace only), never announced
+    assert await wait_until(
+        lambda: any("unconfirmed token on screen: CDDC{test_canary}" in f
+                    for f in w.status()["findings"]),
+        timeout=3,
+    )
+    assert "CDDC{test_canary}" not in w.status()["candidates"], "canary wrongly announced"
+    assert "CDDC{...}" not in w.status()["candidates"], "placeholder wrongly treated as a flag"
+    assert not any("CANDIDATE FLAG" in p for p in chan.posts), "announced with no declaration"
+    ok("on-screen test/placeholder flags are NOT announced (no false candidate)")
+
+    # the agent DECLARES the real flag by writing the .cddc_solution sentinel
+    session.solution = "CDDC{harness_solve}\n"
     assert await wait_until(lambda: "CDDC{harness_solve}" in w.status()["candidates"], timeout=3)
     assert any("CDDC{harness_solve}" in p and "CANDIDATE FLAG" in p for p in chan.posts), \
-        "real flag not announced"
-    assert "CDDC{...}" not in w.status()["candidates"], "placeholder wrongly treated as a flag"
+        "declared flag not announced"
     assert ch.state == "solving", f"agent halted on a candidate (should keep running): {ch.state}"
-    ok("real flag announced + placeholder ignored, agent keeps running (no halt)")
+    ok("declared flag (sentinel) announced; agent keeps running (no halt)")
 
     # operator confirms with !solved -> stands down AND tears the session down
     w.mark_solved()
@@ -280,7 +326,10 @@ async def scenario_harness_halt() -> None:
 
     ch = Challenge(id="h2", name="halt-warmup", category="crypto", thread_id=607)
     chan = ConsoleChannel("crypto", echo=False)
-    session = FakeHarness(["working...\nfound it: CDDC{halt_solve}"], stay_alive=True)
+    session = FakeHarness(["working on it..."], stay_alive=True)
+    # A NON-CDDC flag format: the sentinel is an explicit declaration, so its
+    # contents are trusted regardless of prefix (different CTFs, different formats).
+    session.solution = "NCO26{rsalcg?justd0-quadr4t1c!}"
     w = HarnessWorker(
         get_lane("crypto"), ch, chan,
         id="wh2", name="crypto-h2", session=session, cli="claude",
@@ -288,11 +337,51 @@ async def scenario_harness_halt() -> None:
     )
     task = asyncio.create_task(w.run())
     assert await wait_until(lambda: ch.state == "candidate", timeout=3), "did not halt on flag"
-    ok("halt_on_flag=True halts for validation on a candidate")
+    assert "NCO26{rsalcg?justd0-quadr4t1c!}" in w.status()["candidates"], \
+        "non-CDDC sentinel flag not declared"
+    ok("halt_on_flag=True halts on a declared flag (any format, e.g. NCO26{...})")
     w.mark_solved()
     await task
     assert ch.state == "solved"
     ok("halt path stands down on !solved")
+
+
+# --- scenario 5d: harness model-summarizer (composes clean Discord lines) --
+async def scenario_harness_summary() -> None:
+    print("scenario: harness model-summarizer (composes Discord messages)")
+    from cddc.harness import FakeHarness
+    from cddc.harness_worker import HarnessWorker
+
+    ch = Challenge(id="hsum", name="sum", category="crypto", thread_id=608)
+    chan = ConsoleChannel("crypto", echo=False)
+    # A raw TUI-ish frame: banner/box chrome + a real action line underneath.
+    frame = (
+        "╭─── Claude Code v2.1 ───╮\n│ Welcome back Mono! │\n╰────────────────────╯\n"
+        "⏺ Bash(unzip chall.zip)\n  Archive: chall.zip\n  extracting strings.bin"
+    )
+    session = FakeHarness([frame], stay_alive=True)
+    summ = FakeModel([Reply(content="unzipping chall.zip, extracting strings.bin", tokens=9)])
+    w = HarnessWorker(
+        get_lane("crypto"), ch, chan, id="whsum", name="crypto-hsum",
+        session=session, cli="claude", max_minutes=999, poll_interval=0.02,
+        summarizer=summ, summarize_every=0.0,  # compose as soon as there's output
+    )
+    task = asyncio.create_task(w.run())
+
+    # a COMPOSED one-liner (from the summarizer) is posted, not the raw TUI frame
+    assert await wait_until(
+        lambda: any("unzipping chall.zip, extracting strings.bin" in p for p in chan.posts),
+        timeout=3,
+    )
+    # the raw banner / box chrome never reaches Discord
+    assert not any("Claude Code v2" in p or "Welcome back" in p for p in chan.posts), \
+        "raw TUI chrome leaked to the feed"
+    assert w.status().get("summary_tokens", 0) >= 9, "summary token accounting off"
+    ok("summarizer composes a clean line; raw TUI chrome stays out of Discord")
+
+    w.cancel()
+    await task
+    ok("summarizer harness stands down on !kill")
 
 
 # --- scenario 6: sandbox routing + per-lane tool gating (no docker) -------
@@ -340,6 +429,77 @@ async def scenario_sandbox_and_gating() -> None:
             "request_escalation"} <= raw_tools, f"raw missing core tools: {raw_tools}"
     assert "request_escalation" in rev_tools, "escalation must be offered even on gated lanes"
     ok("rev gates out fetch_url; web grants it; raw offers all; submit_flag/escalation always on")
+
+
+# --- scenario 6b: docker-socket gating (role-gated, no docker) -----------
+async def scenario_docker_socket_gating() -> None:
+    print("scenario: docker-socket gating (triage off, specialist on; no docker)")
+    from cddc import config
+    from cddc.sandbox import Sandbox
+
+    # 1) role policy: triage withheld, any other role granted; "" disables all,
+    #    CDDC_TRIAGE_SOCKET arms triage (the explicit exception knob).
+    assert config.docker_sock_for_role("triage") == "", "triage must not get the socket"
+    assert config.docker_sock_for_role("specialist") == config.DOCKER_SOCK, "specialist should get the socket"
+    saved_sock = config.DOCKER_SOCK
+    try:
+        config.DOCKER_SOCK = ""
+        assert config.docker_sock_for_role("specialist") == "", "empty CDDC_DOCKER_SOCK disables everywhere"
+    finally:
+        config.DOCKER_SOCK = saved_sock
+    saved_tri = config.TRIAGE_SOCKET
+    try:
+        config.TRIAGE_SOCKET = True
+        assert config.docker_sock_for_role("triage") == config.DOCKER_SOCK, "CDDC_TRIAGE_SOCKET should arm triage"
+    finally:
+        config.TRIAGE_SOCKET = saved_tri
+    ok("role policy: triage withheld, specialist granted, both knobs flip it")
+
+    # 2) _run_argv reflects the socket: bound + compose scope when set, absent when not.
+    plain = Sandbox("ctf-sandbox", 777, os.path.join("_files", "simsock"))
+    argv = plain._run_argv("/abs/wd")
+    assert not any(a.endswith("docker.sock") for a in argv), "plain sandbox must not bind the socket"
+    assert not any(a.startswith("COMPOSE_PROJECT_NAME") for a in argv), "plain sandbox should not set compose scope"
+    socked = Sandbox(
+        "ctf-sandbox", 778, os.path.join("_files", "simsock"),
+        docker_sock="/var/run/docker.sock",
+    )
+    argv2 = socked._run_argv("/abs/wd")
+    assert "/var/run/docker.sock:/var/run/docker.sock" in argv2, "socket not bound into run argv"
+    assert "COMPOSE_PROJECT_NAME=cddc-778" in argv2, "compose scope missing"
+    assert "CDDC_THREAD=778" in argv2, "thread id not exported for manual-run labeling"
+    ok("Sandbox._run_argv binds the socket + compose scope only when docker_sock is set")
+
+    # 3) dispatcher gates by role: a triage agent gets a socket-less sandbox; the
+    #    escalation respawn (role_override='specialist') gets one; explicit '' off.
+    reg = Registry()
+    disp = Dispatcher(reg)
+    saved_sb = config.CDDC_SANDBOX
+    try:
+        config.CDDC_SANDBOX = "docker"
+        ch = Challenge(id="dk1", name="svc", category="web", thread_id=7001)
+        triage = await disp.dispatch(
+            ch, ConsoleChannel("web", echo=False),
+            kind="agent", model=FakeModel([]), autostart=False,
+        )
+        assert triage.sandbox is not None and triage.sandbox.docker_sock is None, "triage got a socket"
+        ch2 = Challenge(id="dk2", name="svc", category="web", thread_id=7002)
+        spec = await disp.dispatch(
+            ch2, ConsoleChannel("web", echo=False),
+            kind="agent", model=FakeModel([]), autostart=False,
+            role_override="specialist",
+        )
+        assert spec.sandbox is not None and spec.sandbox.docker_sock == config.DOCKER_SOCK, "specialist missing socket"
+        ch3 = Challenge(id="dk3", name="svc", category="web", thread_id=7003)
+        forced = await disp.dispatch(
+            ch3, ConsoleChannel("web", echo=False),
+            kind="agent", model=FakeModel([]), autostart=False,
+            role_override="specialist", docker_sock="",
+        )
+        assert forced.sandbox.docker_sock is None, "explicit docker_sock='' should force the socket off"
+    finally:
+        config.CDDC_SANDBOX = saved_sb
+    ok("dispatcher: triage socket-less, escalated specialist gets it, explicit '' forces off")
 
 
 # --- scenario 7: real AgentWorker + real docker Sandbox (CDDC_SIM_DOCKER) -
@@ -437,15 +597,15 @@ async def scenario_harness_docker() -> None:
     shutil.copy(src, dst)  # drop the distfile into the bind-mounted workdir
 
     ch = Challenge(
-        id="ebk", name="elite_ball_knowledge", category="misc", thread_id=thread_id,
+        id="ebk", name="baby_bof", category="pwn", thread_id=thread_id,
         description=(
             f"The distribution file {os.path.basename(src)} is in your working "
             "directory. Unzip it if needed, analyze the challenge, and recover the "
-            "flag. Flags look like CDDC{...} - print it when you find it."
+            "flag. Flags look like grey{...}. There is a dummy flag.txt in the folder for your testing, there is no real flag in the distribution."
         ),
         files=[dst],
     )
-    chan = ConsoleChannel("misc", echo=True)  # echo live so we watch it work
+    chan = ConsoleChannel("pwn", echo=True)  # echo live so we watch it work
     sandbox = Sandbox(
         config.CDDC_SANDBOX_IMAGE, thread_id, workdir,
         extra_mounts=credential_mounts(config.HARNESS_USER),
@@ -458,18 +618,25 @@ async def scenario_harness_docker() -> None:
         user=config.HARNESS_USER,
         startup_keys=keys,
     )
+    # Cheap DeepSeek summarizer narrates claude's TUI into clean lines (set
+    # DEEPSEEK_API_KEY to see it; otherwise the feed is the cleaned raw output).
+    summ = None
+    if config.HARNESS_SUMMARIZE and config.DEEPSEEK_API_KEY:
+        from cddc.models import DeepSeekClient
+        summ = DeepSeekClient(config.DEEPSEEK_API_KEY, config.DEEPSEEK_BASE_URL, config.CHURN_MODEL)
     w = HarnessWorker(
         get_lane("misc"), ch, chan, id="whd", name="misc-harness",
         session=session, cli="claude", max_minutes=max_minutes, poll_interval=5,
+        summarizer=summ, summarize_every=config.HARNESS_SUMMARIZE_SECS,
     )
     task = asyncio.create_task(w.run())
 
     # "Runs properly" = claude cleared its startup gate and is actively working:
-    # it posted real CLI output (a `[claude] ...` delta) and reached a candidate
-    # flag, or is still grinding. We wait for substantive output, then for a
-    # candidate (or the worker to exit).
+    # any `[claude] ...` post means real output flowed (a summarized line or, with
+    # no summarizer, a cleaned delta). Gate/sandbox posts are `[harness]`/
+    # `[sandbox]`, so a `[claude]` post is an unambiguous "it's producing" signal.
     def has_cli_output() -> bool:
-        return any(p.startswith("[claude]") and len(p) > 40 for p in chan.posts)
+        return any(p.startswith("[claude] ") and len(p) > len("[claude] ") for p in chan.posts)
 
     assert await wait_until(has_cli_output, timeout=max_minutes * 60, interval=2), (
         "claude never produced CLI output - it is likely stuck on a startup gate; "
@@ -648,11 +815,17 @@ async def main() -> None:
     print()
     await scenario_agent()
     print()
+    await scenario_agent_flag_hygiene()
+    print()
     await scenario_harness()
     print()
     await scenario_harness_halt()
     print()
+    await scenario_harness_summary()
+    print()
     await scenario_sandbox_and_gating()
+    print()
+    await scenario_docker_socket_gating()
     print()
     await scenario_escalation()
     print()

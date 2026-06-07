@@ -5,13 +5,13 @@ This image is intentionally staged. Web and crypto are implemented; the other
 lane layers are still placeholders.
 
 Build:
-  docker build -f sandbox/Dockerfile.sandbox -t cddc-sandbox sandbox
+  docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox sandbox
 
 Build one stage:
-  docker build -f sandbox/Dockerfile.sandbox --target pwn -t cddc-sandbox:pwn sandbox
+  docker build -f sandbox/Dockerfile.sandbox --target pwn -t ctf-sandbox:pwn sandbox
 
 Run:
-  docker run --rm -it -v "$PWD:/challenge" cddc-sandbox
+  docker run --rm -it -v "$PWD:/challenge" ctf-sandbox
 
 LAYERS
 ------
@@ -19,8 +19,16 @@ LAYERS
 base
   Present now:
     ubuntu, python3, pip, venv, git, curl, wget, file, jq, xxd, zip/unzip, tmux
+    docker client + compose v2 plugin (client only, no daemon)
+    docker shim (cddc-docker-shim) shadowing `docker` for per-challenge labeling
   Purpose:
-    Common OS/runtime layer for all challenge work.
+    Common OS/runtime layer for all challenge work. The docker client is inert
+    unless the bot binds the host /var/run/docker.sock into the sandbox (gated to
+    non-triage roles, CDDC_DOCKER_SOCK) - then the agent can `docker compose up` a
+    service challenge against the host daemon (docker-out-of-docker). The shim
+    auto-labels manual `docker run`/`create` with cddc.thread=$CDDC_THREAD so the
+    host reaps the sibling containers per challenge even without compose; the real
+    client lives at docker.real and the shim is a no-op when CDDC_THREAD is unset.
 
 web
   Present now:

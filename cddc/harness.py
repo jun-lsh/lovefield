@@ -35,6 +35,7 @@ class HarnessSession(Protocol):
     async def send(self, text: str) -> None: ...
     async def alive(self) -> bool: ...
     async def stop(self) -> None: ...
+    async def read_solution(self) -> str: ...  # the flag-declaration sentinel
 
 
 # Env vars passed THROUGH to the container (no value = inherit from the bot's
@@ -43,8 +44,24 @@ class HarnessSession(Protocol):
 _PASSTHROUGH_ENV = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 
 # Sent to the CLI once it has booted - points it at the task file we drop in the
-# workdir (avoids a giant, quoting-fragile send-keys of the whole prompt).
-_KICKOFF = "Read .cddc_task.md and solve the challenge. When you find the flag, print it on its own line."
+# workdir (avoids a giant, quoting-fragile send-keys of the whole prompt). The
+# flag is DECLARED by writing it to .cddc_solution (an unambiguous signal we read
+# host-side), NOT by printing it - the agent prints test/example flags too, and
+# scraping those off the screen caused false candidates.
+_KICKOFF = (
+    "Read .cddc_task.md and solve the challenge. To DECLARE the flag: once you "
+    "have VERIFIED the real one, write ONLY that flag to .cddc_solution in your "
+    "working directory (e.g. `echo 'CDDC{...}' > .cddc_solution`). That file is "
+    "your success signal - never write a test, example, or placeholder flag to it. "
+    "If a service needs to be running and `docker` works, `docker compose up` or "
+    "`docker run` it normally - containers you start are auto-cleaned per-challenge, "
+    "no teardown needed. If you start one via the python docker SDK or a raw API "
+    "call instead, label it `cddc.thread=$CDDC_THREAD` so it gets reaped."
+)
+
+# The agent declares success by writing the verified flag here (in its workdir,
+# bind-mounted so we read it host-side). Robust vs regex-scraping the TUI.
+SOLUTION_FILE = ".cddc_solution"
 
 # Host credential FILES to share into the container so the CLIs are already
 # logged in. We mount individual files, not the whole ~/.claude / ~/.codex dirs,
@@ -112,10 +129,12 @@ class TmuxHarness:
         self.boot_delay = boot_delay
         self.history = history
         self.kickoff = kickoff
-        # Key names (tmux send-keys) to clear the CLI's startup gate before the
-        # kickoff. claude's `--dangerously-skip-permissions` warning highlights
-        # "No, exit" by default, so ["Down", "Enter"] selects "Yes, I accept".
-        self.startup_keys = ["Down", "Enter"] if startup_keys is None else list(startup_keys)
+        # Key names (tmux send-keys) to clear the CLI's startup gate, sent AFTER
+        # _await_gate() confirms the prompt is up. claude's trust-folder prompt
+        # DEFAULTS the cursor to "Yes, I trust this folder", so a bare ["Enter"]
+        # accepts it - any arrow moves OFF the correct option (Up wraps 1->2,
+        # which is what made it exit). (codex --full-auto usually needs none.)
+        self.startup_keys = ["Enter"] if startup_keys is None else list(startup_keys)
         self._server = None
         self._session = None
         self._pane = None
@@ -194,14 +213,66 @@ class TmuxHarness:
             return server, session, pane
 
         self._server, self._session, self._pane = await asyncio.to_thread(_spawn)
-        await asyncio.sleep(self.boot_delay)  # let the TUI come up
-        # Clear the startup gate (e.g. the bypass-permissions warning: Down -> "Yes,
-        # I accept" -> Enter) so the kickoff lands in the chat input, not the modal.
-        for key in self.startup_keys:
-            await self._key(key)
-            await asyncio.sleep(0.4)
-        await asyncio.sleep(0.5)
+        self._dbg(f"spawned session={self.session_name} cmd={self._docker_cmd()!r}")
+        # Clear claude's startup gates as they render. There are up to TWO, in
+        # sequence, each with its affirmative in a different spot (so a flat key
+        # list can't do it), and the second only appears after the first clears.
+        # We poll + answer per-gate instead of blind-firing (which raced the TUI).
+        await self._clear_gates()
+        await asyncio.sleep(1.5)  # let the chat input settle after the last gate
+        self._dbg(f"sending kickoff (alive={await self.alive()})\n{await self.capture()}")
         await self.send(self.kickoff)
+
+    def _dbg(self, msg: str) -> None:
+        """Print harness timeline diagnostics when CDDC_HARNESS_DEBUG is set."""
+        if os.environ.get("CDDC_HARNESS_DEBUG"):
+            import sys
+            print(f"[harness-dbg {self.cli}] {msg}", file=sys.stderr, flush=True)
+
+    async def _clear_gates(self, timeout: float = 60.0) -> None:
+        """Poll the pane and answer claude's startup prompts as they render.
+
+        claude shows up to two gates, in order, each answered differently:
+          1. trust-folder      - cursor defaults to "Yes, I trust this folder",
+                                  so a bare Enter accepts it.
+          2. bypass-permissions - cursor defaults to "No, exit"; "Yes, I accept"
+                                  is the option BELOW, so Down then Enter.
+        We poll (keys never race the TUI) and loop, since gate 2 only appears
+        AFTER gate 1 clears. Returns once a poll shows no gate (after clearing
+        >=1), or after a short boot wait with no gate at all (codex --full-auto,
+        or an already-trusted+accepted run).
+        """
+        waited = 0.0
+        cleared = 0
+        while waited < timeout and cleared < 6:  # cap: never spin forever
+            # VISIBLE screen only - capture() pulls scrollback, where a cleared
+            # gate's text lingers and would re-match forever (the spin you saw).
+            low = (await self._screen()).lower()
+            if "trust this folder" in low:
+                self._dbg("gate: trust-folder -> Enter")
+                await self._enter()
+                cleared += 1
+                await asyncio.sleep(1.5)
+                waited += 1.5
+                continue
+            if "bypass permissions" in low or "yes, i accept" in low:
+                self._dbg("gate: bypass-permissions -> Down,Enter")
+                await self._key("Down")
+                await asyncio.sleep(0.4)
+                await self._enter()
+                cleared += 1
+                await asyncio.sleep(1.5)
+                waited += 1.5
+                continue
+            if cleared:
+                self._dbg(f"gates cleared ({cleared}); chat input should be live")
+                return
+            if waited >= 10.0:
+                self._dbg("no gate after 10s; assuming none and proceeding")
+                return
+            await asyncio.sleep(1.0)
+            waited += 1.0
+        self._dbg(f"gate-clear done (cleared {cleared}, waited {waited:.0f}s)")
 
     async def capture(self) -> str:
         if self._pane is None:
@@ -218,13 +289,36 @@ class TmuxHarness:
         except Exception:
             return ""
 
+    async def _screen(self) -> str:
+        """The CURRENTLY VISIBLE pane (no scrollback) - for gate detection.
+
+        capture() includes -S scrollback so the worker can tail-diff output, but
+        a one-shot gate's text lingers there after it's cleared, which made gate
+        detection re-fire forever. A gate, while ACTIVE, owns the visible screen,
+        so we detect on the visible screen only.
+        """
+        if self._pane is None:
+            return ""
+
+        def _cap():
+            return "\n".join(self._pane.cmd("capture-pane", "-p").stdout)
+
+        try:
+            return await asyncio.to_thread(_cap)
+        except Exception:
+            return ""
+
     async def _key(self, name: str) -> None:
-        """Send a single named key (tmux key name, e.g. 'Enter', 'Down')."""
+        """Send a single named key (tmux key name, e.g. 'Enter', 'Down', 'Up').
+
+        Uses the RAW `tmux send-keys <name>` command rather than libtmux's
+        send_keys() wrapper - the wrapper can quote/suppress-history-pad the
+        argument, which mangles key NAMES into literal characters. The raw form
+        lets tmux interpret 'Up' as the arrow key, not the letters U,p.
+        """
         if self._pane is None:
             return
-        await asyncio.to_thread(
-            lambda: self._pane.send_keys(name, enter=False, literal=False, suppress_history=False)
-        )
+        await asyncio.to_thread(lambda: self._pane.cmd("send-keys", name))
 
     async def _enter(self) -> None:
         await self._key("Enter")
@@ -268,6 +362,25 @@ class TmuxHarness:
         await asyncio.to_thread(_kill)
         await self.sandbox.teardown()
 
+    async def read_solution(self) -> str:
+        """Read the flag-declaration sentinel the CLI writes on success.
+
+        The agent is told (kickoff) to write ONLY the verified flag to
+        `<workdir>/.cddc_solution`. We read it host-side off the bind-mounted
+        workdir - far more reliable than scraping every CDDC{...} off the screen
+        (which catches the agent's own test/example flags). Missing file -> "".
+        """
+        path = os.path.join(self.workdir, SOLUTION_FILE)
+
+        def _read():
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    return f.read()
+            except OSError:
+                return ""
+
+        return await asyncio.to_thread(_read)
+
 
 class FakeHarness:
     """Scripted session for the sim: pops a canned screen-capture per poll.
@@ -285,6 +398,7 @@ class FakeHarness:
         self.sent: list[str] = []
         self.started = False
         self.stopped = False
+        self.solution = ""  # sim sets this to simulate the agent declaring a flag
 
     async def start(self, prompt: str) -> None:
         self.started = True
@@ -305,3 +419,6 @@ class FakeHarness:
 
     async def stop(self) -> None:
         self.stopped = True
+
+    async def read_solution(self) -> str:
+        return self.solution

@@ -13,3 +13,10 @@ into the role/lane prompts.
   only. If you need to look something up, say so and ask the operator.
 - No reversing/pwn tooling (gdb, ghidra, etc.) is set up here yet. Treat binary
   challenges as analysis-only for now and flag what you would need.
+- Docker (only if `docker` works in your shell - a host socket is bound in for
+  specialist/deep roles, not triage): you can `docker compose up` / `docker run` a
+  service challenge against the host daemon. Containers you start are
+  auto-labeled `cddc.thread=$CDDC_THREAD` and reaped per-challenge, so you do NOT
+  need to clean them up. The one exception: if you create a container by some
+  OTHER route (the python `docker` SDK, a raw API call, podman), label it
+  `cddc.thread=$CDDC_THREAD` yourself or it will leak.

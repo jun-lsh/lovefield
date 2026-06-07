@@ -5,10 +5,10 @@
 # we can grow the image deliberately instead of baking a huge opaque blob.
 #
 # Build the combined placeholder image:
-#   docker build -f sandbox/Dockerfile.sandbox -t cddc-sandbox sandbox
+#   docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox sandbox
 #
 # Build a specific layer while iterating:
-#   docker build -f sandbox/Dockerfile.sandbox --target pwn -t cddc-sandbox:pwn sandbox
+#   docker build -f sandbox/Dockerfile.sandbox --target pwn -t ctf-sandbox:pwn sandbox
 
 ARG UBUNTU_VERSION=22.04
 
@@ -38,6 +38,37 @@ RUN apt-get update \
         xxd \
         zip \
     && rm -rf /var/lib/apt/lists/*
+
+# Docker CLIENT only (no daemon): a specialist sandbox can have the host docker
+# socket bound in (docker-OUT-of-docker, gated to non-triage roles by the bot) so
+# the agent can `docker compose up` a service challenge. We pull the static
+# `docker` client plus the Compose v2 CLI plugin; both talk to the mounted
+# /var/run/docker.sock, neither runs a daemon here. Compose is what lets us scope
+# (COMPOSE_PROJECT_NAME) and reap the sibling containers. Cheap (~80MB) and inert
+# when no socket is mounted.
+ARG DOCKER_VERSION=28.1.1
+ARG COMPOSE_VERSION=v2.36.0
+RUN arch="$(uname -m)" \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_VERSION}.tgz" \
+        -o /tmp/docker.tgz \
+    && tar -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker \
+    && rm /tmp/docker.tgz \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${arch}" \
+        -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    && docker --version \
+    && docker compose version
+
+# Shadow `docker` with a shim that auto-labels manual `docker run`/`create` with
+# cddc.thread=$CDDC_THREAD, so the host can reap per-challenge siblings even when
+# the agent doesn't use compose. The real client moves to docker.real; the shim
+# is a transparent no-op when CDDC_THREAD is unset. See sandbox/cddc-docker-shim.
+COPY cddc-docker-shim /usr/local/bin/docker.shim
+RUN mv /usr/local/bin/docker /usr/local/bin/docker.real \
+    && mv /usr/local/bin/docker.shim /usr/local/bin/docker \
+    && chmod 0755 /usr/local/bin/docker /usr/local/bin/docker.real \
+    && docker.real --version
 
 WORKDIR /challenge
 
