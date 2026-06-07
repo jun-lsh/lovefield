@@ -16,12 +16,24 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import os
 import pathlib
 import re
 
 import discord
 from discord.ext import commands
+
+# Operational logs to stdout (separate from the agent's Discord narration) so the
+# operator's terminal shows a heartbeat - model-call timing, tool timing, spawns -
+# and you can tell "stuck" from "thinking". discord.py's own logs stay at WARNING.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname).1s %(name)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logging.getLogger("discord").setLevel(logging.WARNING)
+_log = logging.getLogger("cddc.bot")
 
 from .challenge import Challenge
 from .config import (
@@ -31,6 +43,7 @@ from .config import (
     ANTHROPIC_API_KEY,
     ANTHROPIC_BASE_URL,
     CATEGORY_LANE,
+    CDDC_SANDBOX,
     CHURN_MODEL,
     CHURN_THINKING,
     CLAUDE_MAX_TOKENS,
@@ -38,6 +51,7 @@ from .config import (
     CODEX_MODEL,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
+    DISABLE_HANDOFF,
     DOWNLOAD_DIR,
     ESCALATION_BUDGET_MULT,
     HARNESS_CLI,
@@ -45,6 +59,7 @@ from .config import (
     IGNORE_CHANNELS,
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
+    SPECIALIST_KIND,
     STATUS_CHANNEL,
     WORKER_KIND,
     category_for_channel,
@@ -95,11 +110,31 @@ elif _model is not None:
 else:
     _KIND = "dummy"
 
+# The ESCALATION tier (separate from triage): !escalate respawns THIS kind. The
+# two-tier bridge - cheap triage escalates to a real specialist. Defaults to a
+# light DeepSeek specialist now; "harness" makes it the Claude Code box agent. In
+# dummy mode there's nothing real to escalate to, so it stays dummy.
+_SPECIALIST_KIND = _KIND if _KIND == "dummy" else SPECIALIST_KIND
+
+_log.info(
+    "tiers: triage=%s specialist=%s | provider=%s model=%s sandbox=%s",
+    _KIND, _SPECIALIST_KIND, AGENT_PROVIDER, CHURN_MODEL, CDDC_SANDBOX,
+)
+if _KIND == "agent" and CDDC_SANDBOX != "docker":
+    # run_shell runs on the HOST with no isolation - the model-driven shell can
+    # read/touch your whole filesystem. Fine for trusted crypto/web solving, scary
+    # for untrusted binaries. Set CDDC_SANDBOX=docker to confine it to /challenge.
+    _log.warning(
+        "CDDC_SANDBOX=%s -> run_shell runs on the HOST (no isolation; full filesystem "
+        "access). Set CDDC_SANDBOX=docker to confine the agent to the container.",
+        CDDC_SANDBOX,
+    )
+
 # Cheap model that narrates the CLI harness's noisy TUI into clean 1-line Discord
 # updates. Always DeepSeek (cheap) regardless of the harness's own provider; None
 # -> the harness posts cleaned-but-raw screen deltas instead.
 _summarizer = None
-if _KIND == "harness" and HARNESS_SUMMARIZE:
+if (_KIND == "harness" or _SPECIALIST_KIND == "harness") and HARNESS_SUMMARIZE:
     if DEEPSEEK_API_KEY:
         # Summarizer stays NON-thinking - it writes a 1-line narration, reasoning
         # tokens would just burn cost for no gain.
@@ -153,10 +188,12 @@ class DiscordChannel:
     @staticmethod
     def _severity(content: str) -> str | None:
         """'big' for candidate-flag / needs-human, 'halt' for a decision-ask."""
-        if ("CANDIDATE FLAG" in content) or ("NEEDS HUMAN" in content):
+        # a verified flag, a working-but-blocked local solve, or a hard stuck =
+        # the big-alert tier (same urgency: the operator must act now)
+        if ("CANDIDATE FLAG" in content) or ("LOCAL SOLVE" in content) or ("NEEDS HUMAN" in content):
             return "big"
-        # any worker question / escalation = a halt awaiting a human decision
-        if ("[ask]" in content) or ("ESCALATION REQUEST" in content):
+        # any worker question / triage report = a halt awaiting a human decision
+        if ("[ask]" in content) or ("TRIAGE REPORT" in content):
             return "halt"
         return None
 
@@ -193,10 +230,12 @@ class DiscordChannel:
             return
         if "CANDIDATE FLAG" in content:
             kind = "CANDIDATE FLAG"
+        elif "LOCAL SOLVE" in content:
+            kind = "LOCAL SOLVE (needs remote)"
         elif "NEEDS HUMAN" in content:
             kind = "NEEDS HUMAN"
-        elif "ESCALATION REQUEST" in content:
-            kind = "ESCALATION"
+        elif "TRIAGE REPORT" in content:
+            kind = "TRIAGE REPORT"
         else:
             kind = "DECISION NEEDED"
         prefix, allowed = _alert(sev)
@@ -479,6 +518,12 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
     if not workers:
         await ctx.send("no worker here to escalate")
         return
+    if DISABLE_HANDOFF:
+        await ctx.send(
+            "handoff disabled (`CDDC_DISABLE_HANDOFF=1`) - staying on triage. "
+            "`!deny` to keep it grinding, `!kill` to stop."
+        )
+        return
 
     parts = arg.split()
     mode = parts[0].lower() if parts else ""
@@ -499,8 +544,10 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
     old = workers[0]
     ch = old.chall
     handoff = (
-        f"[triage handoff] difficulty {ch.difficulty}/5, "
-        f"technique: {ch.technique or '?'}. {ch.escalation_reason or ''} "
+        f"[triage handoff] {ch.gist or ''} "
+        f"difficulty {ch.difficulty}/5, technique: {ch.technique or '?'}. "
+        f"blockers: {ch.escalation_reason or '-'} "
+        f"(triage recommended: {ch.recommendation or '?'}). "
         f"triage tried: {', '.join(old.tried[-6:]) or '-'}"
     )
     channel = ch.channel
@@ -515,7 +562,9 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
             new_chall, channel,
             lane_override=lane_override,
             on_candidate=_candidate_hook,
-            kind=_KIND, model=_model, cli=HARNESS_CLI, summarizer=_summarizer,
+            # the SPECIALIST tier, not the triage kind: a deeper agent now, or the
+            # Claude Code box harness when CDDC_SPECIALIST_KIND=harness.
+            kind=_SPECIALIST_KIND, model=_model, cli=HARNESS_CLI, summarizer=_summarizer,
             role_override="specialist",
             budget_mult=ESCALATION_BUDGET_MULT,
         )
@@ -612,22 +661,28 @@ async def cmd_solved(ctx: commands.Context) -> None:
 
 @bot.command(name="continue", aliases=["deny"])
 async def cmd_continue(ctx: commands.Context, *, reason: str = "") -> None:
-    """Reject + re-open: `!continue <why>` rejects a candidate flag, `!deny`
-    refuses an escalation. Both fold the note in and resume the worker(s)."""
+    """Resume a halted worker. After a CANDIDATE FLAG it's a rejection
+    (`!continue <why>`); after a TRIAGE REPORT / budget halt it just means
+    "keep going" - an optional `!continue <steer>` folds a nudge in. `!deny` is
+    the same, named for refusing an escalation."""
     workers = registry.workers(ctx.channel.id)
     if not workers:
         await ctx.send("no worker here")
         return
-    denying = ctx.invoked_with == "deny"
-    default = (
-        "operator: escalation denied, keep going as triage" if denying
-        else "operator: candidate rejected, keep going"
-    )
-    note = reason or default
+    # Only a pending candidate FLAG is a "rejection"; a report/budget halt is just
+    # a continue. Pick the language (and the default folded note) from the state.
+    rejecting = any(w.chall.state == "candidate" for w in workers)
+    if reason:
+        note = reason
+    elif rejecting:
+        note = "operator: candidate rejected, keep going"
+    else:
+        note = "operator: continue"
     for w in workers:
         w.continue_with(note)
-    verb = "escalation denied" if denying else "re-opened"
-    await ctx.send(f"{verb} - {len(workers)} agent(s) resuming. folded in: {note}")
+    verb = "candidate rejected, re-deriving" if rejecting else "continuing"
+    tail = f" (steer: {reason})" if reason else ""
+    await ctx.send(f"{verb} - {len(workers)} agent(s) resuming{tail}")
 
 
 @bot.command(name="help")

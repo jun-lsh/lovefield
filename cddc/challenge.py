@@ -46,11 +46,15 @@ class Challenge:
     hard: bool = False      # operator foresight at allocation -> deep_solver
     state: str = "new"
     steers: list[str] = field(default_factory=list)
-    # Triage's difficulty read + escalation request (set when an agent calls
-    # request_escalation; carried into the specialist respawn as a handoff).
+    # Triage's advisory report (set when an agent calls triage_report; the
+    # difficulty/technique/escalation_reason are carried into a specialist respawn
+    # as the handoff). The report RECOMMENDS - the operator decides.
     difficulty: int = 0          # 1 (trivial) .. 5 (very hard); 0 = unassessed
     technique: str = ""          # named attack class the triage agent identified
-    escalation_reason: str = ""  # why it asked to escalate
+    escalation_reason: str = ""  # the blockers / why it might need help
+    gist: str = ""               # what the challenge is / what it wants
+    recommendation: str = ""     # solo_finish|race|specialist|deep_solver|needs_human
+    confidence: str = ""         # low|medium|high - how sure the cheap model is
 
     def __post_init__(self) -> None:
         if self.state not in STATES:

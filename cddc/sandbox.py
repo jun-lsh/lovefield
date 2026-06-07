@@ -34,11 +34,15 @@ class Sandbox:
         mount: str = "/challenge",
         extra_mounts: list[str] | None = None,
         docker_sock: str | None = None,
+        mount_flag: str = "",
     ) -> None:
         self.image = image
         self.thread_id = thread_id
         self.host_workdir = host_workdir
         self.mount = mount
+        # SELinux relabel flag for the workdir bind-mount ("z"/"Z"); empty = none.
+        # Needed only on SELinux-enforcing hosts; a no-op (and a footgun) elsewhere.
+        self.mount_flag = (mount_flag or "").strip().lstrip(":")
         # Extra `-v` specs appended to `docker run` (e.g. host credential files
         # for the harness CLIs). Each is a full "src:dst[:opts]" string.
         self.extra_mounts = list(extra_mounts or [])
@@ -77,7 +81,10 @@ class Sandbox:
     def _run_argv(self, host_abs: str) -> list[str]:
         """Build the `docker run` argv. Split out so the sim can assert on it
         (mounts/socket) without actually launching a container."""
-        mount_args: list[str] = ["-v", f"{host_abs}:{self.mount}:Z"]
+        workdir_spec = f"{host_abs}:{self.mount}"
+        if self.mount_flag:
+            workdir_spec += f":{self.mount_flag}"
+        mount_args: list[str] = ["-v", workdir_spec]
         for spec in self.extra_mounts:
             mount_args += ["-v", spec]
         sock_args: list[str] = []

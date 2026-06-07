@@ -7,6 +7,11 @@ first wall the way a triage bot would.
 
 ## How you work
 
+- Lean on the skill library. Triage already named the likely attack class - your
+  first move is to `list_skill_docs lanes/ctf-<lane>` and `read_skill_doc` the
+  writeups that match it. They carry concrete techniques, gadgets, and worked
+  solves; follow the closest one instead of reinventing it. Read the handoff the
+  operator passed you (triage's gist / technique / what it tried) and start there.
 - Go deep methodically. Form a concrete hypothesis about the mechanism, design a
   test that would confirm or kill it, run it, and update. One disciplined
   hypothesis-test loop at a time beats flailing.

@@ -102,26 +102,63 @@ def tool_specs() -> list[dict]:
             ["flag"],
         ),
         _spec(
-            "request_escalation",
-            "Escalate this challenge to a specialist when it is beyond a cheap "
-            "triage solve (too hard, or it needs tooling/knowledge you lack). "
-            "Halts you for an operator decision - prefer this over grinding a "
-            "hard challenge. Give your honest difficulty read and the reason.",
+            "solve_ready",
+            "Call this when you have a WORKING solve/exploit that succeeds locally "
+            "but cannot produce the REAL flag because something external is missing "
+            "- most often the remote target (host:port) isn't connected, or a "
+            "server-provided input. It pings the operator to hook it up (same alert "
+            "as a flag). Do NOT use it for being stuck - only when the solve itself "
+            "works and the ONLY thing left is the external piece.",
             {
+                "summary": {"type": "string", "description": "what your solve does / how it works"},
+                "needs": {
+                    "type": "string",
+                    "description": "the exact external thing required, e.g. "
+                    "'remote host:port for the ElGamal oracle'",
+                },
+            },
+            ["summary", "needs"],
+        ),
+        _spec(
+            "triage_report",
+            "File your triage report - the terminal handoff when you are NOT "
+            "cleanly solving this yourself. You are a cheap first pass: do NOT "
+            "decide the challenge's fate, RECOMMEND and let the operator pick. "
+            "Halts for an operator decision. Give an honest read - a clear 'this "
+            "is hard, here's why' is a win, not a failure.",
+            {
+                "gist": {
+                    "type": "string",
+                    "description": "what the challenge IS / what it wants, in 1-2 lines",
+                },
                 "difficulty": {
                     "type": "integer",
                     "description": "1 (trivial) to 5 (very hard)",
                 },
                 "technique": {
                     "type": "string",
-                    "description": "named attack/challenge class, e.g. 'RSA/Franklin-Reiter'",
+                    "description": "suspected attack/challenge class, e.g. 'RSA/Franklin-Reiter'",
                 },
-                "reason": {
+                "blockers": {
                     "type": "string",
-                    "description": "one line: why a specialist is needed (what's blocking you)",
+                    "description": "what makes it hard / what's needed - include any "
+                    "web_search signals (e.g. 'libfoo 2.0 -> CVE-2024-xxxx exists')",
+                },
+                "recommendation": {
+                    "type": "string",
+                    "enum": ["solo_finish", "race", "specialist", "deep_solver", "needs_human"],
+                    "description": "your advised next move (the operator may override): "
+                    "solo_finish=let an agent keep grinding; race=fan out 2-3; "
+                    "specialist=hand to a specialist on this lane; deep_solver=the "
+                    "expensive deep researcher; needs_human=a human must look",
+                },
+                "confidence": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "how sure you are of this read",
                 },
             },
-            ["difficulty", "technique", "reason"],
+            ["gist", "difficulty", "blockers", "recommendation"],
         ),
     ]
 

@@ -72,36 +72,55 @@ def declared_flag(text: str) -> str | None:
     return cand
 
 
+def _fence(body: str) -> str:
+    """Wrap arbitrary (model-generated) text in a code fence so Discord renders it
+    LITERALLY - no stray `*`/`_`/backtick mangling the thread. Uses a 4-backtick
+    fence if the body itself contains a 3-backtick run."""
+    body = (body or "").strip() or "(none)"
+    fence = "````" if "```" in body else "```"
+    return f"{fence}\n{body}\n{fence}"
+
+
+def _md_escape(text: str) -> str:
+    """Escape Discord markdown specials so model prose renders as written (an
+    underscore in a flag name won't start italics, etc.)."""
+    return re.sub(r"([\\*_~`|>])", r"\\\1", text or "")
+
+
 def summary(
     post: str,
     findings: list[str],
     *,
     flag: str | None = None,
     needs_human: bool = False,
-    escalation: dict | None = None,
+    report: dict | None = None,
+    menu: str | None = None,
 ) -> str:
-    """The FINDINGS / CANDIDATE FLAG / ESCALATION / NEEDS HUMAN block.
+    """The FINDINGS / CANDIDATE FLAG / TRIAGE REPORT / NEEDS HUMAN block.
 
     Discord-agnostic string builder - bot.py and the console both post the same
-    block. Kept here (not in bot.py) so it's testable without a token.
-    `escalation` is {difficulty, technique, reason}; it renders the operator's
-    decision menu (resolved by !escalate / !deny).
+    block. Kept here (not in bot.py) so it's testable without a token. Dynamic
+    (model-generated) content is code-fenced so it can't mangle the formatting;
+    structural headers stay markdown. `report` is {gist, difficulty, technique,
+    blockers, recommendation, confidence}. The operator decides via `menu`.
     """
-    lines = [post.strip(), "", "**FINDINGS**"]
-    lines += [f"  - {f}" for f in findings] or ["  - (none)"]
+    fnd = "\n".join(f"- {f}" for f in findings) if findings else "(none)"
+    lines = [post.strip(), "", "**FINDINGS**", _fence(fnd)]
     if flag:
         lines += ["", f"**CANDIDATE FLAG** -> `{flag}`  (human submits)"]
-    if escalation:
-        lines += [
-            "",
-            f"**ESCALATION REQUEST** - difficulty {escalation.get('difficulty', 0)}/5, "
-            f"technique: {escalation.get('technique') or '?'}",
-            f"  reason: {escalation.get('reason') or '-'}",
-            "  decide: `!escalate` (specialist, same lane) | `!escalate deep` | "
-            "`!escalate race [n]` | `!deny` (keep going as triage)",
-        ]
+    if report:
+        body = "\n".join([
+            f"difficulty : {report.get('difficulty', 0)}/5  (confidence {report.get('confidence') or '?'})",
+            f"gist       : {report.get('gist') or '-'}",
+            f"technique  : {report.get('technique') or '?'}",
+            f"hard        : {report.get('blockers') or '-'}",
+            f"recommend  : {(report.get('recommendation') or '?').upper()}",
+        ])
+        lines += ["", "**TRIAGE REPORT**", _fence(body)]
     if needs_human:
         lines += ["", "**NEEDS HUMAN** - stuck in a way a human must resolve"]
+    if menu:
+        lines += ["", f"your call: {menu}"]
     return "\n".join(lines)
 
 
@@ -151,6 +170,7 @@ class Worker:
         self._resume = asyncio.Event()
         self._resume.set()  # set == not paused
         self._inbox: list[str] = []  # direct steers (registry broadcast/target)
+        self._steer_event = asyncio.Event()  # wakes a HALTED worker so it can answer
         self._prev_state = "new"     # to restore after a pause
 
         # Flag-validation handshake: a candidate flag does NOT insta-kill. It
@@ -223,9 +243,12 @@ class Worker:
 
         Operator `!steer` text from Discord normally arrives via
         `channel.drain_steer()`; this method is the direct path the registry
-        uses to target one worker. Both are merged at the top of each loop.
+        uses to target one worker. Both are merged at the top of each loop - and
+        the event wakes a worker HALTED at a decision so it can answer the steer
+        as a question without the operator having to !continue first.
         """
         self._inbox.append(msg)
+        self._steer_event.set()
 
     def race_now(self) -> None:
         self._racing = True

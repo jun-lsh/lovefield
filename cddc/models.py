@@ -40,7 +40,7 @@ class Reply:
 
 
 class ModelClient(Protocol):
-    async def chat(self, messages: list[dict], tools: list[dict]) -> Reply: ...
+    async def chat(self, messages: list[dict], tools: list[dict], *, tool_choice=None) -> Reply: ...
 
 
 def assistant_message(reply: Reply) -> dict:
@@ -76,12 +76,15 @@ class DeepSeekClient:
         self.model = model
         self._thinking = thinking
 
-    async def chat(self, messages: list[dict], tools: list[dict]) -> Reply:
+    async def chat(self, messages: list[dict], tools: list[dict], *, tool_choice=None) -> Reply:
         kwargs: dict = {
             "model": self.model,
             "messages": messages,
             "tools": tools or None,
-            "tool_choice": "auto" if tools else None,
+            # tool_choice="required" forces SOME tool call; pass a {"type":"function",
+            # "function":{"name":...}} dict to force a specific one (used to FORCE a
+            # triage_report at the budget cap).
+            "tool_choice": tool_choice if tool_choice is not None else ("auto" if tools else None),
         }
         if self._thinking:
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
@@ -206,7 +209,7 @@ class ClaudeClient:
         self.model = model
         self.max_tokens = max_tokens
 
-    async def chat(self, messages: list[dict], tools: list[dict]) -> Reply:
+    async def chat(self, messages: list[dict], tools: list[dict], *, tool_choice=None) -> Reply:
         system, msgs = _to_anthropic_messages(messages)
         kwargs: dict = {
             "model": self.model,
@@ -217,6 +220,13 @@ class ClaudeClient:
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = _to_anthropic_tools(tools)
+            # Map the OpenAI-style force onto Anthropic's shape (best-effort).
+            if tool_choice == "required":
+                kwargs["tool_choice"] = {"type": "any"}
+            elif isinstance(tool_choice, dict):
+                fn = tool_choice.get("function", {}).get("name")
+                if fn:
+                    kwargs["tool_choice"] = {"type": "tool", "name": fn}
         resp = await self._client.messages.create(**kwargs)
         content = ""
         calls: list[ToolCall] = []
@@ -238,7 +248,7 @@ class FakeModel:
         self._script = list(script)
         self.model = "fake"
 
-    async def chat(self, messages: list[dict], tools: list[dict]) -> Reply:
+    async def chat(self, messages: list[dict], tools: list[dict], *, tool_choice=None) -> Reply:
         if self._script:
             return self._script.pop(0)
         return Reply(content="(fake model: out of script)", tool_calls=[])

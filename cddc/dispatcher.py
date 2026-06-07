@@ -7,9 +7,12 @@ bot calls this on thread-create; simulate.py calls it directly.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 
 from . import config
+
+_log = logging.getLogger("cddc.dispatch")
 from .agent_worker import AgentWorker
 from .challenge import Challenge
 from .channel import Channel
@@ -26,23 +29,22 @@ class Dispatcher:
         self._n = 0  # monotonic worker counter -> ids/names
 
     def pick_lane(self, chall: Challenge, *, override: str | None = None) -> Lane:
-        """Resolve the lane: explicit `!lane` override > smell hooks > category.
+        """Resolve the INITIAL lane: explicit `!lane` override > category.
 
-        Smell hooks are STUBBED in phase 1 (the handoff's `# TODO` pattern) - the
-        thin-triage doctrine says a worker self-assesses and may self-escalate,
-        but none of that routing is built yet. Wired as comments so phase 4 has
-        the hook points.
+        Deliberately dumb. By doctrine (see roles/triage.md) the cheap triage
+        agent does NOT auto-route - it recons, web_searches, and files a
+        `triage_report` that RECOMMENDS a tier (solo_finish/race/specialist/
+        deep_solver/needs_human). The operator reads it and pulls the trigger
+        (`!escalate [deep|race]`), which re-dispatches with a role/lane override.
+        So "smell hooks" are SIGNALS the agent folds into its report, NOT
+        autonomous reroutes here. The ONE up-front route is the human-set
+        `chall.hard` flag -> straight to deep_solver: that's operator foresight at
+        allocation ("this'll need a deep researcher"), not a model guess.
         """
         if override:
             return get_lane(override)
-
-        # --- TODO smell hooks (phase 4; not implemented) ------------------
-        # if chall.hard:                         -> deep_solver (operator foresight)
-        # if smells_cve_or_version(chall):       -> research_run
-        # if smells_windows_pe_or_anti_wine(...): -> windows
-        # if smells_trivial(chall):              -> raw
-        # Self-escalation (mid-run, with justification) lives in the worker,
-        # not here - e.g. pwn recon reveals kernel pwn -> request deep_solver.
+        if chall.hard:
+            return get_lane("deep_solver")
 
         category = chall.category
         lane_name = config.lane_for_category(category)
@@ -85,7 +87,9 @@ class Dispatcher:
         name = f"{lane.name}-{self._n}"
 
         if kind == "agent":
-            workdir = os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id))
+            # Absolute: a relative workdir is a docker bind-mount footgun (the
+            # daemon resolves -v against ITS cwd, not the bot's).
+            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
             # Role drives which skills/roles/<role>.md doctrine loads. Thin-
             # triage-always by default; a specialist-mode lane (deep_solver,
             # windows) gets the deep-solver doctrine instead. Escalation / !lane
@@ -103,6 +107,7 @@ class Dispatcher:
                 sandbox = Sandbox(
                     config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
                     docker_sock=sock or None,
+                    mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
                 )
             # Web tools (provider-agnostic): DDG default / Serper keyed search +
             # Jina extraction. None searcher (provider="none") -> tool withheld.
@@ -139,7 +144,7 @@ class Dispatcher:
             from .harness_worker import HarnessWorker
             from .sandbox import Sandbox
 
-            workdir = os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id))
+            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
             which = (cli or config.HARNESS_CLI).lower()
             launch = config.CODEX_CLI_CMD if which == "codex" else config.CLAUDE_CLI_CMD
             keys_csv = config.CODEX_STARTUP_KEYS if which == "codex" else config.CLAUDE_STARTUP_KEYS
@@ -158,6 +163,7 @@ class Dispatcher:
             sandbox = Sandbox(
                 config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
                 extra_mounts=creds, docker_sock=sock or None,
+                mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
             )
             session = TmuxHarness(
                 which, sandbox, workdir,
@@ -202,6 +208,8 @@ class Dispatcher:
         chall.channel = channel
         chall.state = "dispatched"
         self.registry.add(chall.thread_id, worker)
+        _log.info("dispatched %s: lane=%s kind=%s thread=%s '%s'",
+                  name, lane.name, kind, chall.thread_id, (chall.name or "?")[:40])
 
         if autostart:
             # Run as a task - NEVER block the gateway heartbeat (bot.py footgun).

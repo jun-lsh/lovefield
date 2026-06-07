@@ -71,7 +71,7 @@ async def chat(self, messages: list[dict], tools: list[dict]) -> Reply
 
 config: `CDDC_PROVIDER=deepseek|openai|anthropic` + per-provider key/model; the
 bot's `_model = ...` block (~bot.py:52) picks the client. `submit_flag` /
-`request_escalation` are agent-handled - just surface them as `tool_calls`.
+`triage_report` are agent-handled - just surface them as `tool_calls`.
 
 ## Division of labor (so we don't clash)
 

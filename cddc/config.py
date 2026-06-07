@@ -59,8 +59,11 @@ CATEGORY_LANE: dict[str, str] = {
 DEFAULT_LANE = "raw"
 
 # Where !start saves downloaded distribution files (a per-challenge subdir is
-# created under this). Gitignored. Override with CDDC_FILES_DIR.
-DOWNLOAD_DIR = os.environ.get("CDDC_FILES_DIR", "_files")
+# created under this). Gitignored. Override with CDDC_FILES_DIR. expanduser so a
+# `~/...` value resolves to your home (Python does NOT expand ~ like the shell -
+# without this it makes a literal `~` directory) - and a WSL-native home path
+# bind-mounts into docker far more cleanly than a /mnt/c path.
+DOWNLOAD_DIR = os.path.expanduser(os.environ.get("CDDC_FILES_DIR", "_files"))
 
 # Seconds the dummy worker waits between scripted steps on the live bot. Slow
 # enough to catch a run mid-flight and !steer / !status / !kill / !lane it.
@@ -85,6 +88,12 @@ WORKER_KIND = _envs("CDDC_WORKER", "dummy").lower()
 # Provider for the real loop: "deepseek" | "claude" | "codex". bot.py builds the
 # matching client and falls back to dummy workers if its key is missing.
 AGENT_PROVIDER = _envs("CDDC_PROVIDER", "deepseek").lower()
+# The ESCALATION tier: what !escalate respawns (the two-tier bridge). For now
+# "agent" = a LIGHT specialist (same model as triage but the specialist doctrine,
+# the ctf skills library, and a deeper budget). Flip to "harness" later for the
+# heavy Claude Code CLI specialist in the box (once the docker layers land - that
+# tier reaches the pwn/rev/etc. tools). Triage always stays CDDC_WORKER.
+SPECIALIST_KIND = _envs("CDDC_SPECIALIST_KIND", "agent").lower()
 
 # DeepSeek (OpenAI-compatible).
 DEEPSEEK_API_KEY = _envs("DEEPSEEK_API_KEY", "")
@@ -155,6 +164,10 @@ AGENT_CHECKPOINT = int(_envs("CDDC_AGENT_CHECKPOINT", "8"))
 # When triage escalates, the respawned specialist gets this multiple of the
 # base step budget (a specialist is meant to grind, not triage).
 ESCALATION_BUDGET_MULT = float(_envs("CDDC_ESCALATION_BUDGET_MULT", "3"))
+# Test/observe knob: when set, `!escalate` refuses to respawn a specialist - the
+# triage agent stays put (use `!deny` to keep it grinding). For testing triage in
+# isolation before the specialist/deep tiers (and their docker layers) are ready.
+DISABLE_HANDOFF = _envs("CDDC_DISABLE_HANDOFF", "0").lower() in ("1", "true", "yes")
 
 # Where run_shell executes: "local" (host, no isolation) | "docker" (per-challenge
 # ctf-sandbox container, workdir bind-mounted). Crypto/web/research keep working
@@ -162,6 +175,11 @@ ESCALATION_BUDGET_MULT = float(_envs("CDDC_ESCALATION_BUDGET_MULT", "3"))
 # pwn/rev binaries. Requires the bot to run as a docker-capable user.
 CDDC_SANDBOX = _envs("CDDC_SANDBOX", "local").lower()
 CDDC_SANDBOX_IMAGE = _envs("CDDC_SANDBOX_IMAGE", "ctf-sandbox")
+# SELinux bind-mount relabel flag ("z" shared / "Z" private). EMPTY by default -
+# it's a no-op on WSL/Docker Desktop and only needed on SELinux-enforcing hosts
+# (Fedora/RHEL), where you'd set CDDC_SANDBOX_MOUNT_FLAG=Z so the container can
+# read the mount.
+CDDC_SANDBOX_MOUNT_FLAG = _envs("CDDC_SANDBOX_MOUNT_FLAG", "").strip().lstrip(":")
 
 # Docker-OUT-of-docker: host daemon socket bound into a worker's sandbox so the
 # agent inside can stand up service containers (a `docker compose up` challenge,

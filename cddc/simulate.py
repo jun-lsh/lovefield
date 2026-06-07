@@ -77,6 +77,16 @@ async def scenario_routing() -> None:
     assert w.lane.name == "raw"
     ok("unknown category falls back to raw")
 
+    # Operator-foresight `hard` flag routes straight to deep_solver (not a model
+    # guess) - beats category, loses only to an explicit !lane override.
+    ch = Challenge(id="hd", name="x", category="crypto", thread_id=2002, hard=True)
+    w = await disp.dispatch(ch, ConsoleChannel(echo=False), autostart=False)
+    assert w.lane.name == "deep_solver", f"hard flag should route to deep_solver, got {w.lane.name}"
+    ch = Challenge(id="hd2", name="x", category="crypto", thread_id=2003, hard=True)
+    w = await disp.dispatch(ch, ConsoleChannel(echo=False), lane_override="web", autostart=False)
+    assert w.lane.name == "web", "!lane override must still beat the hard flag"
+    ok("hard flag -> deep_solver (operator foresight); !lane override still wins")
+
 
 # --- scenario 2: progress + steer + race-hold + validation ---------------
 async def scenario_steer_and_race() -> None:
@@ -423,12 +433,12 @@ async def scenario_sandbox_and_gating() -> None:
     web_tools = {s["function"]["name"] for s in _specs_for_lane(get_lane("web"))}
     assert "fetch_url" in web_tools, "web should offer fetch_url"
     # raw has no allowlist -> it offers every advertised tool. submit_flag and
-    # request_escalation are always on (agent-handled), even on gated lanes.
+    # triage_report are always on (agent-handled), even on gated lanes.
     raw_tools = {s["function"]["name"] for s in _specs_for_lane(get_lane("raw"))}
     assert {"run_shell", "read_file", "write_file", "fetch_url", "submit_flag",
-            "request_escalation"} <= raw_tools, f"raw missing core tools: {raw_tools}"
-    assert "request_escalation" in rev_tools, "escalation must be offered even on gated lanes"
-    ok("rev gates out fetch_url; web grants it; raw offers all; submit_flag/escalation always on")
+            "triage_report"} <= raw_tools, f"raw missing core tools: {raw_tools}"
+    assert "triage_report" in rev_tools, "triage_report must be offered even on gated lanes"
+    ok("rev gates out fetch_url; web grants it; raw offers all; submit_flag/triage_report always on")
 
 
 # --- scenario 6b: docker-socket gating (role-gated, no docker) -----------
@@ -713,9 +723,9 @@ async def scenario_harness_docker() -> None:
     ok("harness pipeline completed and tore down the container")
 
 
-# --- scenario 8: triage escalation (request -> deny -> continue -> solve) -
+# --- scenario 8: triage report (advise -> deny -> continue -> solve) ------
 async def scenario_escalation() -> None:
-    print("scenario: triage escalation (request -> deny -> continue -> solve)")
+    print("scenario: triage report (advise -> deny -> continue -> solve)")
     ch = Challenge(
         id="e1", name="hard-rsa", category="crypto", thread_id=777,
         description="ciphertext + public params; smells like a known RSA attack",
@@ -726,9 +736,11 @@ async def scenario_escalation() -> None:
               tool_calls=[ToolCall("t1", "run_shell", {"command": "echo workdir"})]),
         Reply(content="this is a lattice/Franklin-Reiter job - beyond a cheap triage solve",
               tokens=60,
-              tool_calls=[ToolCall("t2", "request_escalation",
-                                   {"difficulty": 4, "technique": "RSA/Franklin-Reiter",
-                                    "reason": "needs a specialist with lattice tooling"})]),
+              tool_calls=[ToolCall("t2", "triage_report",
+                                   {"gist": "RSA with related messages; recover m",
+                                    "difficulty": 4, "technique": "RSA/Franklin-Reiter",
+                                    "blockers": "needs lattice tooling / sage; no cheap one-shot",
+                                    "recommendation": "deep_solver", "confidence": "medium"})]),
         Reply(content="operator says grind it - retrying via the related-message angle",
               tokens=60,
               tool_calls=[ToolCall("t3", "run_shell", {"command": "echo CDDC{related_msg}"})]),
@@ -743,13 +755,16 @@ async def scenario_escalation() -> None:
     )
     task = asyncio.create_task(w.run())
 
-    # triage hits the wall and HALTS with an escalation request (needs_human),
-    # recording its difficulty read on the challenge for the handoff
+    # triage files a REPORT and HALTS (needs_human), recording its read +
+    # recommendation on the challenge for the handoff
     assert await wait_until(lambda: ch.state == "needs_human", timeout=5)
     assert ch.difficulty == 4, f"difficulty not captured: {ch.difficulty}"
     assert ch.technique == "RSA/Franklin-Reiter", "technique not captured"
-    assert any("ESCALATION REQUEST" in p for p in chan.posts), "no escalation block posted"
-    ok("triage requests escalation -> halts (needs_human), difficulty captured")
+    assert ch.recommendation == "deep_solver", f"recommendation not captured: {ch.recommendation!r}"
+    assert ch.gist, "gist not captured"
+    assert any("TRIAGE REPORT" in p for p in chan.posts), "no triage report block posted"
+    assert any("DEEP_SOLVER" in p for p in chan.posts), "recommendation not rendered"
+    ok("triage files a report (recommend, not decide) -> halts; read + recommendation captured")
 
     # operator DENIES (the !deny path == continue_with): fold a note + re-open;
     # the worker pushes on as triage and reaches a candidate
@@ -762,14 +777,96 @@ async def scenario_escalation() -> None:
     assert any("CDDC{related_msg}" in p for p in chan.posts), "no candidate after deny"
     ok("!deny folds a note + re-opens -> triage pushes on to a candidate")
 
-    # tool RESULTS now post to the thread (the truncation fix), not just actions
-    assert any("-> CDDC{related_msg}" in p for p in chan.posts), "tool result not posted"
-    ok("tool results are posted to the thread, not only fed to the model")
+    # tool RESULTS now post to the thread (the truncation fix), not just actions -
+    # code-fenced, so the result header + a fenced block both appear
+    assert any("run_shell ->" in p for p in chan.posts), "tool result header not posted"
+    assert any(p.startswith("```") and "CDDC{related_msg}" in p for p in chan.posts), "fenced tool result not posted"
+    ok("tool results are posted to the thread (code-fenced), not only fed to the model")
 
     w.mark_solved()
     await task
     assert ch.state == "solved"
     ok("agent stands down on !solved after a denied escalation")
+
+
+# --- scenario 8b: forced triage call at the cap + steer-while-halted ------
+async def scenario_budget_force_report() -> None:
+    print("scenario: budget cap FORCES a triage call; !steer answers while halted")
+    ch = Challenge(
+        id="bf1", name="gamal", category="crypto", thread_id=909,
+        description="ElGamal-ish scheme; recover the flag",
+    )
+    chan = ConsoleChannel("crypto", echo=False)
+    script = [
+        # one scoping step (no narration -> findings would be empty without help)
+        Reply(content="", tokens=50, tool_calls=[ToolCall("a1", "run_shell", {"command": "echo scoping"})]),
+        # the FORCED triage_report at the cap (the _force_report call)
+        Reply(content="", tokens=40, tool_calls=[ToolCall("a2", "triage_report", {
+            "gist": "ElGamal with an LSB oracle via Legendre symbol",
+            "difficulty": 3, "technique": "ElGamal/LSB-oracle",
+            "blockers": "no remote target host:port in the files",
+            "recommendation": "solo_finish", "confidence": "high"})]),
+        # the answer to the operator's question while halted
+        Reply(content="No host:port appears in the supplied files or description; "
+              "you'd need the organizer's netcat endpoint.", tokens=30),
+    ]
+    w = AgentWorker(
+        get_lane("crypto"), ch, chan,
+        id="wbf", name="crypto-bf", model=FakeModel(script),
+        workdir=os.path.join("_files", "sim909"),
+        max_steps=1, max_tokens=10_000_000, shell_timeout=10, role="triage",
+    )
+    task = asyncio.create_task(w.run())
+
+    # hits the cap after 1 step -> FORCED triage_report (difficulty call), halts
+    assert await wait_until(lambda: ch.state == "needs_human", timeout=5), f"never halted; posts={chan.posts!r}"
+    assert ch.recommendation == "solo_finish", f"forced report not captured: {ch.recommendation!r}"
+    assert ch.difficulty == 3 and ch.gist, "difficulty/gist not captured from the forced report"
+    blk = next((p for p in chan.posts if "[budget]" in p), "")
+    assert "forced triage call" in blk and "TRIAGE REPORT" in blk, f"cap didn't force the report block: {blk!r}"
+    assert "SOLO_FINISH" in blk, "recommendation not rendered in the block"
+    ok("budget cap FORCES a triage_report (difficulty call), not a free-text summary")
+
+    # while halted, !steer a question -> agent answers and STAYS halted
+    w.steer("is there a remote target in the files?")
+    assert await wait_until(lambda: any("[answer]" in p for p in chan.posts), timeout=5), "no answer to the halted-steer"
+    assert any("netcat endpoint" in p for p in chan.posts), "answer content missing"
+    assert ch.state == "needs_human", "asking a question must NOT consume the decision"
+    ok("!steer while halted is answered as a question; the worker stays halted")
+
+    w.cancel()
+    await task
+    assert ch.state == "killed"
+    ok("halted worker stands down on !kill")
+
+
+# --- scenario 8c: solve_ready pings like a flag (local solve, no remote) --
+async def scenario_local_solve() -> None:
+    print("scenario: solve_ready pings like a flag (working local solve, no remote)")
+    # offered on every lane (always-on tool)
+    assert "solve_ready" in {s["function"]["name"] for s in _specs_for_lane(get_lane("rev"))}, \
+        "solve_ready must be offered everywhere"
+    ch = Challenge(id="ls1", name="svc", category="crypto", thread_id=910,
+                   description="ElGamal oracle service")
+    chan = ConsoleChannel("crypto", echo=False)
+    script = [Reply(content="exploit works locally against a dummy", tokens=40, tool_calls=[
+        ToolCall("s1", "solve_ready", {
+            "summary": "LSB-oracle key recovery + AES decrypt",
+            "needs": "remote host:port for the oracle"})])]
+    w = AgentWorker(
+        get_lane("crypto"), ch, chan, id="wls", name="crypto-ls",
+        model=FakeModel(script), workdir=os.path.join("_files", "sim910"),
+        max_steps=40, max_tokens=200_000, shell_timeout=10, role="triage",
+    )
+    task = asyncio.create_task(w.run())
+    assert await wait_until(lambda: ch.state == "needs_human", timeout=5), f"never pinged; posts={chan.posts!r}"
+    blk = next((p for p in chan.posts if "LOCAL SOLVE" in p), "")
+    assert blk and "remote host:port" in blk, f"LOCAL SOLVE block missing/incomplete: {blk!r}"
+    ok("solve_ready posts a LOCAL SOLVE block (bot maps it to a big ping) and halts")
+    w.cancel()
+    await task
+    assert ch.state == "killed"
+    ok("local-solve halt stands down on !kill")
 
 
 # --- scenario 9: WebhookChannel - the on-site path ------------------------
@@ -835,6 +932,11 @@ async def scenario_prompts() -> None:
     assert "reverse engineering" in specialist, "rev lane playbook not loaded"
     ok("specialist NOT poisoned by triage 'move fast' doctrine")
 
+    # both tiers are wired to the ctf skill library (so they read the lane writeups)
+    assert "skill library" in triage and "read_skill_doc" in triage, "triage not wired to the skill library"
+    assert "skill library" in specialist, "specialist not wired to the skill library"
+    ok("both tiers know the ctf skill library exists and how to read it")
+
 
 # --- scenario 11: skill docs are readable, but only through the skill root --
 async def scenario_skill_tools() -> None:
@@ -881,6 +983,10 @@ async def main() -> None:
     await scenario_web_search()
     print()
     await scenario_escalation()
+    print()
+    await scenario_budget_force_report()
+    print()
+    await scenario_local_solve()
     print()
     await scenario_webhook()
     print()

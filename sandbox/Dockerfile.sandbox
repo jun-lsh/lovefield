@@ -89,9 +89,15 @@ RUN apt-get update \
         gcc \
         libc6-dev \
         make \
-        patchelf \
-        radare2 \
+        patchelf \ 
+        patch \
+        pkg-config \
+        python3-dev \
+        gnupg2 \
+        bison  \
     && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/radareorg/radare2 /opt/radare2 && bash /opt/radare2/sys/install.sh
 
 RUN printf '%s\n' \
     'recon layer installed' \

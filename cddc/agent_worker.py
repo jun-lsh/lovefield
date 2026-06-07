@@ -11,21 +11,28 @@ Discord-agnostic: talks to a Channel and a ModelClient, nothing else.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import pathlib
+import time
 
 from .challenge import Challenge
 from .channel import Channel
 from .lanes.base import Lane
 from .models import ModelClient, Reply, assistant_message
 from .tools import Toolbox, tool_specs
-from .worker import Worker, is_placeholder_flag, summary
+from .worker import Worker, _fence, _md_escape, is_placeholder_flag, summary
 
 # Per-agent alignment lives in markdown, NOT here - teammates edit cddc/skills/
 # without touching Python. The system prompt is STACKED from four parts so the
 # triage "move fast" bias never poisons a specialist (see skills/README.md):
 #   common.md + env.md + roles/<role>.md + lanes/<lane>.md
 SKILLS_DIR = pathlib.Path(__file__).parent / "skills"
+
+# Operational heartbeat -> the bot's terminal (NOT Discord). Model-call + tool
+# timing so the operator can tell "thinking hard" from "hung".
+_log = logging.getLogger("cddc.agent")
 
 # Fallback only (used if cddc/skills/ is somehow missing entirely).
 SYSTEM_FALLBACK = """You are a {role} CTF agent for CDDC 2026 on the {lane} lane.
@@ -64,7 +71,7 @@ def load_system(lane_name: str, role: str = "triage") -> str:
 
 # Tools always offered regardless of a lane's allowlist - they're handled in
 # the agent (not the Toolbox), so every agent can submit a flag or escalate.
-_ALWAYS_TOOLS = {"submit_flag", "request_escalation"}
+_ALWAYS_TOOLS = {"submit_flag", "triage_report", "solve_ready"}
 
 # Broadly granted even on gated lanes: googling a CVE / version / attack name and
 # reading a public writeup helps EVERY lane (unlike fetch_url, which is gated to
@@ -77,7 +84,7 @@ def _specs_for_lane(lane: Lane) -> list[dict]:
     """Filter tool_specs() to the lane's allowed set.
 
     An empty `lane.tools` means "offer all" (back-compat for `raw` / unset lanes).
-    `submit_flag` / `request_escalation` and the broad web tools are always offered.
+    `submit_flag` / `triage_report` and the broad web tools are always offered.
     """
     specs = tool_specs()
     if not lane.tools:
@@ -203,7 +210,8 @@ class AgentWorker(Worker):
             specs = [s for s in specs if s["function"]["name"] != "web_search"]
         if self.toolbox.reader is None:
             specs = [s for s in specs if s["function"]["name"] != "read_url"]
-        budget_bonus = 0
+        budget_bonus = 0   # extra STEP runway granted by !continue at the cap
+        token_bonus = 0    # extra TOKEN runway too - else a token-cap !continue re-halts at once
 
         while True:
             if self._cancelled:
@@ -223,26 +231,68 @@ class AgentWorker(Worker):
 
             # budget guard - ask the human instead of silently burning money
             cap = self.max_steps + budget_bonus
-            if self.current_step >= cap or self._tokens >= self.max_tokens:
-                kind = await self._halt(
-                    summary(
+            tok_cap = self.max_tokens + token_bonus
+            if self.current_step >= cap or self._tokens >= tok_cap:
+                # Triage's job is to SCOPE then make the call - so at the cap we
+                # FORCE a triage_report (difficulty + recommendation), not just a
+                # free-text summary. The operator then decides: !continue (let it
+                # build the solve if it's simple), !escalate (hand off), or !kill.
+                # BUT once the operator has greenlit solo_finish, it's in SOLVE
+                # mode, not triage - don't keep re-forcing the same call, just a
+                # plain budget halt.
+                solving = self.chall.recommendation == "solo_finish"
+                report = None if solving else await self._force_report()
+                self.chall.state = "needs_human"
+                if report:
+                    self.chall.difficulty = report["difficulty"]
+                    self.chall.technique = report["technique"]
+                    self.chall.escalation_reason = report["blockers"]
+                    self.chall.gist = report["gist"]
+                    self.chall.recommendation = report["recommendation"]
+                    self.chall.confidence = report["confidence"]
+                    block = summary(
+                        f"[budget] **{self.name}** hit its cap "
+                        f"({self.current_step} steps, {self._tokens} tok) - forced triage call",
+                        self.findings[-6:],
+                        report=report,
+                        menu="`!continue` (keep going - e.g. build the solve if it's "
+                        "simple) | `!escalate` (hand off) | `!kill`",
+                    )
+                else:
+                    rollup = await self._summarize_findings()
+                    block = summary(
                         f"[budget] **{self.name}** hit its cap "
                         f"({self.current_step} steps, {self._tokens} tok)",
-                        self.findings[-5:],
+                        rollup or self.findings[-5:],
                         needs_human=True,
+                        menu="`!continue` to keep churning | `!kill` to stop",
                     )
-                )
+                kind = await self._halt(block)
                 if kind == "cancelled":
                     return await self._exit_killed()
                 if kind == "solved":
                     return await self._exit_solved()
-                budget_bonus += self.max_steps  # !continue grants more runway
+                budget_bonus += self.max_steps   # !continue grants more steps...
+                token_bonus += self.max_tokens   # ...and more tokens, so it can actually churn on
                 self.chall.state = "solving"
+                messages.append({
+                    "role": "user",
+                    "content": "[operator] more runway granted - keep working. If it "
+                    "is simple enough, build and run the solve yourself; otherwise "
+                    "keep scoping and refine your triage_report.",
+                })
                 continue
 
+            _log.info("%s step %d: calling model (%d tok so far)...",
+                      self.name, self.current_step + 1, self._tokens)
+            _t0 = time.monotonic()
             reply = await self._chat(messages, specs)
             if reply is None:  # model failed twice; operator resolved the halt
                 continue
+            _ncalls = len(reply.tool_calls)
+            _log.info("%s step %d: model replied in %.1fs (+%d tok, %d tool call%s)",
+                      self.name, self.current_step + 1, time.monotonic() - _t0,
+                      reply.tokens, _ncalls, "" if _ncalls == 1 else "s")
             self._tokens += reply.tokens
             self.current_step += 1
             self.budget_used = round(min(1.0, self.current_step / max(cap, 1)), 2)
@@ -252,9 +302,9 @@ class AgentWorker(Worker):
                 text = reply.content.strip()
                 self.findings.append(text[:200])
                 # Post the FULL thought - the channel chunks it across messages.
-                # Only a pathological dump gets a visible trim (-> !trace). This
-                # is the narration-side of the truncation the operator saw.
-                await self._post_long(f"[{self.current_step}]", text)
+                # Escaped so stray markdown in the model's prose can't mangle the
+                # thread. Only a pathological dump gets a visible trim (-> !trace).
+                await self._post_long(f"[{self.current_step}]", _md_escape(text))
 
             # Periodic checkpoint: a consolidated rollup so the operator gets
             # signal, not just per-step noise. Template-only (no extra model
@@ -270,7 +320,8 @@ class AgentWorker(Worker):
                 continue
 
             submitted: str | None = None
-            escalate: dict | None = None
+            report: dict | None = None
+            ready: dict | None = None
             for tc in reply.tool_calls:
                 if tc.name == "submit_flag":
                     cand = str(tc.arguments.get("flag", "")).strip()
@@ -288,24 +339,46 @@ class AgentWorker(Worker):
                         messages.append({"role": "tool", "tool_call_id": tc.id,
                                          "content": f"flag recorded: {submitted}"})
                     continue
-                if tc.name == "request_escalation":
-                    escalate = {
+                if tc.name == "triage_report":
+                    report = {
+                        "gist": str(tc.arguments.get("gist", "")).strip(),
                         "difficulty": int(tc.arguments.get("difficulty", 0) or 0),
                         "technique": str(tc.arguments.get("technique", "")).strip(),
-                        "reason": str(tc.arguments.get("reason", "")).strip(),
+                        "blockers": str(tc.arguments.get("blockers", "")).strip(),
+                        "recommendation": str(tc.arguments.get("recommendation", "")).strip(),
+                        "confidence": str(tc.arguments.get("confidence", "")).strip(),
                     }
                     messages.append({"role": "tool", "tool_call_id": tc.id,
-                                     "content": "escalation requested - holding for an operator decision"})
+                                     "content": "triage report filed - holding for an operator decision"})
+                    continue
+                if tc.name == "solve_ready":
+                    ready = {
+                        "summary": str(tc.arguments.get("summary", "")).strip(),
+                        "needs": str(tc.arguments.get("needs", "")).strip(),
+                    }
+                    messages.append({"role": "tool", "tool_call_id": tc.id,
+                                     "content": "local solve flagged - pinging the operator for the missing input"})
                     continue
                 brief = _brief(tc.name, tc.arguments)
                 self.tried.append(f"{tc.name}: {brief}")
-                await self._post_long(f"[{self.current_step}] {tc.name}", brief)
+                await self._post_long(f"[{self.current_step}] {tc.name}", _md_escape(brief))
+                _log.info("%s step %d: %s %s ...", self.name, self.current_step, tc.name, brief[:80])
+                _tt = time.monotonic()
                 result = await self.toolbox.run(tc.name, tc.arguments)
+                _log.info("%s step %d: %s -> %d chars in %.1fs",
+                          self.name, self.current_step, tc.name, len(result or ""), time.monotonic() - _tt)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
-                # Post the RESULT too. It was previously fed only to the model -
-                # so the operator saw the action but never its output: the other
-                # half of the "truncation". Chunked, with a visible trim -> !trace.
-                await self._post_long(f"[{self.current_step}] {tc.name} ->", result or "(no output)")
+                # Post the RESULT too (it was previously fed only to the model). Tool
+                # output is code/data -> CODE-FENCED so shell output, file contents,
+                # and search results render monospace and never mangle the thread.
+                await self._post_code(f"[{self.current_step}] {tc.name} ->", result or "(no output)")
+                # Record a compact action->result line as a finding, so FINDINGS
+                # reflects real work even when the model emits NO narration text
+                # (common on tool-only / thinking-mode turns, where the reasoning
+                # goes to reasoning_content which we drop). Without this the budget/
+                # report summary shows "(none)" after a busy run.
+                snippet = " ".join((result or "(no output)").split())[:180]
+                self.findings.append(f"{brief} -> {snippet}")
 
             if submitted:
                 kind = await self._halt(
@@ -323,24 +396,164 @@ class AgentWorker(Worker):
                     "content": "The operator rejected that flag. Re-examine and try again.",
                 })
 
-            if escalate:
-                kind = await self._halt_escalation(escalate)
+            if ready:
+                kind = await self._halt_local_solve(ready)
                 if kind == "cancelled":
-                    # Operator approved: !escalate cancelled us and is respawning
-                    # a specialist. Stand down quietly (the respawn announces).
                     return await self._exit_killed()
                 if kind == "solved":
                     return await self._exit_solved()
-                # !deny: no specialist is coming; the operator's note was folded
-                # in as a steer. Push on as triage.
+                # !continue: the operator hooked up the remote / supplied the
+                # missing input (folded as a steer). Run the solve for real now.
                 self.chall.state = "solving"
-                self.tried.append(f"escalation denied (d{escalate['difficulty']})")
                 messages.append({
                     "role": "user",
-                    "content": "The operator DENIED escalation - no specialist is coming. "
-                    "Push further yourself: try a different angle, and only stop if "
-                    "truly out of ideas.",
+                    "content": "[operator] the missing input / remote is now provided "
+                    "(see the steer). Run your working solve against it and submit_flag "
+                    "the real flag.",
                 })
+
+            if report:
+                kind = await self._halt_report(report)
+                if kind == "cancelled":
+                    # Operator approved an escalation: !escalate cancelled us and is
+                    # respawning a specialist. Stand down quietly (respawn announces).
+                    return await self._exit_killed()
+                if kind == "solved":
+                    return await self._exit_solved()
+                # !continue / !deny: the operator reviewed the report and wants the
+                # agent to keep going (their note was folded in as a steer). Neutral
+                # framing - NOT "rejected" (there was no candidate flag).
+                self.chall.state = "solving"
+                self.tried.append(f"report continued (d{report['difficulty']})")
+                messages.append({
+                    "role": "user",
+                    "content": "[operator] reviewed your report - keep going. If your "
+                    "recommendation was solo_finish, build and run the solve; otherwise "
+                    "keep working and refine your read.",
+                })
+
+    async def _summarize_findings(self) -> list[str]:
+        """One CHEAP model call - over the LOCAL logs (actions + the findings
+        trail), NOT the full conversation - so the agent distills what it found,
+        tried, and where it's stuck when it halts at the budget cap. Re-sending the
+        whole message log would burn another big chunk right after hitting the cap;
+        the compact trail is enough to write a useful operator summary. Falls back
+        to [] (caller uses the raw findings) if the call fails.
+        """
+        actions = [t for t in self.tried if not t.startswith("steer:")][-12:]
+        context = (
+            f"Challenge: {self.chall.name} (lane {self.lane.name}).\n"
+            f"Description: {(self.chall.description or '(none)')[:500]}\n"
+            f"Actions taken: {'; '.join(actions) or '-'}\n"
+            f"Tool results / notes so far:\n" + ("\n".join(self.findings[-12:]) or "-")
+        )
+        msgs = [
+            {"role": "system", "content": "You summarize a CTF triage run for a human operator. Be concrete and terse."},
+            {"role": "user", "content": context + "\n\nGive 3-6 bullet lines: what the "
+             "challenge is, what you found and tried, and exactly where you are stuck "
+             "or what you would try next. Bullets only, no preamble."},
+        ]
+        try:
+            reply = await self.model.chat(msgs, [])
+            self._tokens += reply.tokens
+            lines = [ln.strip(" -*\t").strip() for ln in (reply.content or "").splitlines()]
+            return [ln for ln in lines if ln]
+        except Exception:
+            return []
+
+    async def _force_report(self) -> dict | None:
+        """FORCE the difficulty call at the budget cap. One model call that MUST
+        produce a triage_report (gist/difficulty/blockers/recommendation), built
+        from the compact local logs (not the whole conversation). The triager's
+        job is to SCOPE then make the call - this guarantees it, even if the cheap
+        model kept wanting to grind. Returns the report dict, or None if it could
+        not produce one (caller falls back to a free-text summary).
+        """
+        spec = [s for s in tool_specs() if s["function"]["name"] == "triage_report"]
+        actions = [t for t in self.tried if not t.startswith("steer:")][-12:]
+        context = (
+            f"Challenge: {self.chall.name} (lane {self.lane.name}).\n"
+            f"Description: {(self.chall.description or '(none)')[:500]}\n"
+            f"Actions taken: {'; '.join(actions) or '-'}\n"
+            f"Findings / results:\n" + ("\n".join(self.findings[-14:]) or "-")
+        )
+        msgs = [
+            {"role": "system", "content": "You are a CTF triage agent that is OUT OF BUDGET. Make the difficulty call now."},
+            {"role": "user", "content": context + "\n\nYou are out of triage budget. "
+             "File your triage_report NOW: gist, difficulty 1-5, technique, blockers, "
+             "and a recommendation - solo_finish if it is simple enough to just "
+             "finish, else race / specialist / deep_solver / needs_human. Base it on "
+             "what you found above."},
+        ]
+        reply = None
+        for choice in ("required", None):  # try to force the tool, then fall back
+            try:
+                reply = await self.model.chat(msgs, spec, tool_choice=choice)
+                break
+            except Exception:
+                reply = None
+        if reply is None:
+            return None
+        self._tokens += reply.tokens
+        for call in reply.tool_calls:
+            if call.name == "triage_report":
+                a = call.arguments
+                return {
+                    "gist": str(a.get("gist", "")).strip(),
+                    "difficulty": int(a.get("difficulty", 0) or 0),
+                    "technique": str(a.get("technique", "")).strip(),
+                    "blockers": str(a.get("blockers", "")).strip(),
+                    "recommendation": str(a.get("recommendation", "")).strip(),
+                    "confidence": str(a.get("confidence", "")).strip(),
+                }
+        return None
+
+    async def _await_decision(self) -> str:
+        """Wait for the operator's verdict (!solved / !continue / !kill), but stay
+        RESPONSIVE while halted: a !steer is treated as a question - the agent
+        answers it from what it knows and keeps waiting. Asking does NOT consume the
+        continue/kill decision, so the operator can interrogate before deciding.
+        """
+        while True:
+            self._steer_event.clear()
+            vt = asyncio.create_task(self._validation.wait())
+            st = asyncio.create_task(self._steer_event.wait())
+            try:
+                await asyncio.wait({vt, st}, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                vt.cancel()
+                st.cancel()
+            if self._cancelled:
+                return "cancelled"
+            if self._validation.is_set():
+                return self._validation_kind or "continue"
+            steers = self._collect_steers()
+            if steers:
+                await self._answer_while_halted(steers)
+
+    async def _answer_while_halted(self, steers: list[str]) -> None:
+        """Answer an operator question (asked via !steer while halted) from what the
+        agent already knows - no tools, compact context. Stays halted afterward."""
+        q = " ".join(s.strip() for s in steers if s.strip())
+        if not q:
+            return
+        await self._post(f"[steer] {q}")
+        actions = [t for t in self.tried if not t.startswith("steer:")][-12:]
+        context = (
+            f"Challenge: {self.chall.name} (lane {self.lane.name}).\n"
+            f"What you've done: {'; '.join(actions) or '-'}\n"
+            f"Findings so far:\n" + ("\n".join(self.findings[-12:]) or "-")
+        )
+        msgs = [
+            {"role": "system", "content": "You are a paused CTF triage agent answering the operator's question. Answer concisely from what you already know; do not call tools."},
+            {"role": "user", "content": context + f"\n\nOperator asks: {q}\n\nAnswer concisely."},
+        ]
+        try:
+            reply = await self.model.chat(msgs, [])
+            self._tokens += reply.tokens
+            await self._post_long("[answer]", reply.content or "(no answer)")
+        except Exception as e:
+            await self._post(f"[answer] failed: {e!r}")
 
     def _checkpoint(self, cap: int) -> str:
         """Consolidated 'what's come out so far' rollup (no model call)."""
@@ -410,30 +623,79 @@ class AgentWorker(Worker):
             body = body[:MAX_POST] + f"\n...[+{len(body) - MAX_POST} chars - !trace for full]"
         await self._post(f"{header} {body}".rstrip())
 
-    async def _halt_escalation(self, esc: dict) -> str:
-        """Record triage's difficulty read, post an ESCALATION REQUEST, and HALT.
+    async def _post_code(self, header: str, body: str) -> None:
+        """Post tool output as CODE-FENCED chunks - each chunk small enough to keep
+        its own fences (so a long dump split across messages never breaks the
+        fence). Trims a pathological dump, visibly, with a pointer to !trace."""
+        body = (body or "(no output)").rstrip()
+        if len(body) > MAX_POST:
+            body = body[:MAX_POST] + f"\n...[+{len(body) - MAX_POST} chars - !trace for full]"
+        await self._post(header)
+        chunk = 1850
+        for i in range(0, len(body), chunk):
+            await self._post(_fence(body[i:i + chunk]))
 
-        Reuses the validation gate. Resolved by the bot: !escalate cancels us
-        and respawns a specialist (-> 'cancelled'); !deny folds a note and
-        re-opens us as triage (-> 'continue').
+    async def _halt_report(self, report: dict) -> str:
+        """Record triage's read, post the TRIAGE REPORT (advice, not a decision),
+        and HALT for the operator.
+
+        Reuses the validation gate. Resolved by the bot: !escalate cancels us and
+        respawns a specialist (-> 'cancelled'); !deny folds a note and re-opens us
+        as triage (-> 'continue'). The recommendation is advisory - the operator
+        picks; a `solo_finish` rec just means "!deny / let it grind".
         """
-        self.chall.difficulty = esc["difficulty"]
-        self.chall.technique = esc["technique"]
-        self.chall.escalation_reason = esc["reason"]
+        self.chall.difficulty = report["difficulty"]
+        self.chall.technique = report["technique"]
+        self.chall.escalation_reason = report["blockers"]
+        self.chall.gist = report["gist"]
+        self.chall.recommendation = report["recommendation"]
+        self.chall.confidence = report["confidence"]
         self._validation.clear()
         self._validation_kind = None
         self.chall.state = "needs_human"
+        rec = report.get("recommendation") or ""
+        if rec == "solo_finish":
+            menu = "`!continue` (let it build/finish the solve) | `!kill`"
+        else:
+            menu = ("`!escalate` (specialist) | `!escalate deep` | `!escalate race [n]` | "
+                    "`!continue` (keep it on triage)")
         await self.channel.post(
             summary(
-                f"[escalate] **{self.name}** requests escalation",
+                f"[triage] **{self.name}** filed a triage report",
                 self.findings[-6:],
-                escalation=esc,
+                report=report,
+                menu=menu,
             )
         )
-        await self._validation.wait()
-        if self._cancelled:
-            return "cancelled"
-        return self._validation_kind or "continue"
+        return await self._await_decision()
+
+    async def _halt_local_solve(self, ready: dict) -> str:
+        """A WORKING local solve that's only missing an external piece (the remote
+        target). Pings the operator with the SAME urgency as a flag (the "LOCAL
+        SOLVE" marker -> 'big' severity in bot.py: @ping + #status), and halts so
+        the operator can feed the target via !steer + !continue.
+        """
+        self._validation.clear()
+        self._validation_kind = None
+        self.chall.state = "needs_human"
+        body = (
+            f"{ready.get('summary') or '-'}\n"
+            f"needs: {ready.get('needs') or 'the remote target / a missing external input'}"
+        )
+        block = "\n".join([
+            f"[ready] **{self.name}** has a WORKING LOCAL SOLVE - blocked only on the remote",
+            "",
+            "**FINDINGS**",
+            _fence("\n".join(f"- {f}" for f in self.findings[-6:]) or "(none)"),
+            "",
+            "**LOCAL SOLVE READY**",
+            _fence(body),
+            "",
+            "your call: `!steer <target / details>` to feed it, then `!continue` once "
+            "it's hooked up | `!kill`",
+        ])
+        await self.channel.post(block)
+        return await self._await_decision()
 
     async def _halt(self, announcement: str, *, candidate: bool = False) -> str:
         """Announce + HALT for operator validation. Returns the verdict.
@@ -447,10 +709,7 @@ class AgentWorker(Worker):
         await self.channel.post(announcement)
         if candidate and self._on_candidate is not None:
             await self._on_candidate(self, "")
-        await self._validation.wait()
-        if self._cancelled:
-            return "cancelled"
-        return self._validation_kind or "continue"
+        return await self._await_decision()
 
     async def _exit_killed(self) -> None:
         self.chall.state = "killed"
