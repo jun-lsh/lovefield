@@ -502,6 +502,57 @@ async def scenario_docker_socket_gating() -> None:
     ok("dispatcher: triage socket-less, escalated specialist gets it, explicit '' forces off")
 
 
+# --- scenario 6c: web_search + read_url (provider-agnostic, fake backend) -
+async def scenario_web_search() -> None:
+    print("scenario: web_search + read_url (provider-agnostic, no network)")
+    from cddc import search
+
+    # factory routing: none disables search; ddg/serper return a callable; the
+    # Jina reader is always available (keyless).
+    assert search.make_searcher("none") is None, "provider 'none' must disable web search"
+    assert search.make_searcher("") is None, "empty provider must disable web search"
+    assert callable(search.make_searcher("ddg")), "ddg should yield a searcher"
+    assert callable(search.make_searcher("serper", serper_key="k")), "serper should yield a searcher"
+    assert callable(search.make_reader()), "reader (jina) is always available"
+    ok("make_searcher routes provider + disables on none/empty; reader always on")
+
+    # Toolbox with injected fakes - no network, no key.
+    async def fake_search(query, num=None):
+        hits = [
+            {"title": "CVE-2024-1234 in libfoo", "url": "https://nvd/x", "snippet": "RCE in libfoo < 2.1"},
+            {"title": "ctf writeup: padding oracle", "url": "https://blog/y", "snippet": "solved via CBC padding oracle"},
+            {"title": "third", "url": "https://z", "snippet": ""},
+        ]
+        return hits[: (num or 5)]
+
+    async def fake_read(url):
+        return f"# clean markdown of {url}\n\nthe full extracted body text"
+
+    tb = Toolbox(os.path.join("_files", "simsearch"), searcher=fake_search, reader=fake_read)
+    out = await tb.run("web_search", {"query": "libfoo CVE", "num_results": 2})
+    assert "CVE-2024-1234" in out and "https://nvd/x" in out, f"web_search digest wrong: {out!r}"
+    assert "padding oracle" in out, "second result missing from digest"
+    assert "https://z" not in out, "num_results not honored (should cap at 2)"
+    ok("web_search returns a normalized title/url/snippet digest, honoring num_results")
+
+    rd = await tb.run("read_url", {"url": "https://blog/y"})
+    assert "clean markdown of https://blog/y" in rd, f"read_url wrong: {rd!r}"
+    ok("read_url returns clean extracted text")
+
+    # unconfigured Toolbox -> clear message, never a crash.
+    tb_off = Toolbox(os.path.join("_files", "simsearch_off"))
+    off = await tb_off.run("web_search", {"query": "x"})
+    assert "not configured" in off, f"unconfigured web_search should say so: {off!r}"
+    ok("web_search degrades cleanly when no provider is configured")
+
+    # gating: web_search + read_url are broadly offered even on a gated lane
+    # (rev), while fetch_url stays gated out of offline-analysis lanes.
+    rev_tools = {s["function"]["name"] for s in _specs_for_lane(get_lane("rev"))}
+    assert {"web_search", "read_url"} <= rev_tools, "web tools must be offered on gated lanes too"
+    assert "fetch_url" not in rev_tools, "fetch_url should still be gated out of rev"
+    ok("web_search + read_url broadly granted (even rev); fetch_url stays gated")
+
+
 # --- scenario 7: real AgentWorker + real docker Sandbox (CDDC_SIM_DOCKER) -
 async def scenario_sandbox_agent() -> None:
     print("scenario: real agent sandbox lifecycle (docker)")
@@ -826,6 +877,8 @@ async def main() -> None:
     await scenario_sandbox_and_gating()
     print()
     await scenario_docker_socket_gating()
+    print()
+    await scenario_web_search()
     print()
     await scenario_escalation()
     print()

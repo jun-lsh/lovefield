@@ -9,8 +9,11 @@ into the role/lane prompts.
   gmpy2. If a solve genuinely needs Sage (lattice reduction, polynomial GCD over
   Z_n[x], heavy elliptic-curve work), say so plainly - that is a reason to
   escalate, not to fake it with a tool that cannot do the job.
-- No dedicated `web_search` tool is wired in yet. `fetch_url` is direct-fetch
-  only. If you need to look something up, say so and ask the operator.
+- `web_search` is available (Google via Serper, or DuckDuckGo) - use it to look
+  up a CVE, library version, error string, attack name, or find a writeup. Read a
+  result's full page with `read_url` (clean extraction, handles bot-blocked
+  pages); use `fetch_url` only for the challenge's own target/host. If the tool
+  reports it is not configured, say so and ask the operator.
 - No reversing/pwn tooling (gdb, ghidra, etc.) is set up here yet. Treat binary
   challenges as analysis-only for now and flag what you would need.
 - Docker (only if `docker` works in your shell - a host socket is bound in for

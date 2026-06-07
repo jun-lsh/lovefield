@@ -1,14 +1,17 @@
 CDDC SANDBOX PLACEHOLDER TOOLING
 ================================
 
-This image is intentionally staged. Web and crypto are implemented; the other
-lane layers are still placeholders.
+This image is intentionally staged. Recon, web, and crypto are implemented; the
+heavy specialist lane layers (pwn/rev/forens/ai) are still placeholders.
+
+Chain: base -> recon -> harness -> web -> crypto -> pwn -> rev -> forens -> ai
 
 Build:
   docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox sandbox
 
-Build one stage:
-  docker build -f sandbox/Dockerfile.sandbox --target pwn -t ctf-sandbox:pwn sandbox
+Build one stage (e.g. a lean triage box, or a specialist target):
+  docker build -f sandbox/Dockerfile.sandbox --target recon -t ctf-sandbox:recon sandbox
+  docker build -f sandbox/Dockerfile.sandbox --target pwn   -t ctf-sandbox:pwn   sandbox
 
 Run:
   docker run --rm -it -v "$PWD:/challenge" ctf-sandbox
@@ -29,6 +32,18 @@ base
     auto-labels manual `docker run`/`create` with cddc.thread=$CDDC_THREAD so the
     host reaps the sibling containers per challenge even without compose; the real
     client lives at docker.real and the shim is a no-op when CDDC_THREAD is unset.
+
+recon
+  Present now:
+    binutils (strings/objdump/nm/readelf), gcc, g++, make, libc6-dev
+    checksec, patchelf, radare2
+  Purpose:
+    Cross-cutting TRIAGE tooling - compile, disassemble, checksec, and take a
+    quick decompile glance to assess and route a challenge. Sits directly above
+    base so every higher target inherits it; a triage box can build `--target
+    recon` (or harness) without dragging in the heavy specialist layers. Heavy
+    lane depth (pwntools, angr, Ghidra, volatility3, torch) stays in pwn/rev/
+    forens/ai, NOT here.
 
 web
   Present now:

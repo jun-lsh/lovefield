@@ -72,8 +72,36 @@ RUN mv /usr/local/bin/docker /usr/local/bin/docker.real \
 
 WORKDIR /challenge
 
+# ── recon layer: cross-cutting triage tooling (compile / disasm / checksec) ──
+# Sits directly above base so EVERY higher target inherits it - a triage bot (or
+# any specialist) can gcc/objdump/strings/checksec/r2 a binary to assess and route
+# it. base deliberately ships none of this; the HEAVY lane depth (pwntools, angr,
+# Ghidra headless, volatility3, torch) stays in the specialist layers. This is
+# just the thin, category-agnostic recon set. Build a triage box with
+# `--target recon` (or harness); specialists inherit it for free further up.
+FROM base AS recon
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binutils \
+        checksec \
+        g++ \
+        gcc \
+        libc6-dev \
+        make \
+        patchelf \
+        radare2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN printf '%s\n' \
+    'recon layer installed' \
+    'apt: binutils (strings/objdump/nm/readelf), gcc/g++/make/libc6-dev' \
+    'apt: checksec, patchelf, radare2' \
+    'purpose: cross-cutting triage recon (compile/disasm/checksec/quick-decompile)' \
+    > /opt/cddc-recon.txt
+
 # ── harness layer: CLI coding agents (claude code / codex) ──────────────────
-FROM base AS harness
+FROM recon AS harness
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

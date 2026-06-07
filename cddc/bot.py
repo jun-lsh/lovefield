@@ -32,6 +32,7 @@ from .config import (
     ANTHROPIC_BASE_URL,
     CATEGORY_LANE,
     CHURN_MODEL,
+    CHURN_THINKING,
     CLAUDE_MAX_TOKENS,
     CLAUDE_MODEL,
     CODEX_MODEL,
@@ -78,7 +79,9 @@ def _build_model():
     if not DEEPSEEK_API_KEY:
         print("CDDC_PROVIDER=deepseek but DEEPSEEK_API_KEY is empty -> using dummy workers")
         return None
-    return DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL)
+    return DeepSeekClient(
+        DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL, thinking=CHURN_THINKING
+    )
 
 
 _model = _build_model() if WORKER_KIND == "agent" else None
@@ -98,7 +101,11 @@ else:
 _summarizer = None
 if _KIND == "harness" and HARNESS_SUMMARIZE:
     if DEEPSEEK_API_KEY:
-        _summarizer = DeepSeekClient(DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL)
+        # Summarizer stays NON-thinking - it writes a 1-line narration, reasoning
+        # tokens would just burn cost for no gain.
+        _summarizer = DeepSeekClient(
+            DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, CHURN_MODEL, thinking=False
+        )
     else:
         print("CDDC_HARNESS_SUMMARIZE=1 but DEEPSEEK_API_KEY is empty -> harness posts raw output")
 

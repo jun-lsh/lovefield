@@ -66,19 +66,26 @@ def load_system(lane_name: str, role: str = "triage") -> str:
 # the agent (not the Toolbox), so every agent can submit a flag or escalate.
 _ALWAYS_TOOLS = {"submit_flag", "request_escalation"}
 
+# Broadly granted even on gated lanes: googling a CVE / version / attack name and
+# reading a public writeup helps EVERY lane (unlike fetch_url, which is gated to
+# live-target lanes). The worker still drops these from the advertised specs when
+# no provider is configured (search) or always keeps read_url (Jina needs no key).
+_BROAD_TOOLS = {"web_search", "read_url"}
+
 
 def _specs_for_lane(lane: Lane) -> list[dict]:
     """Filter tool_specs() to the lane's allowed set.
 
     An empty `lane.tools` means "offer all" (back-compat for `raw` / unset lanes).
-    `submit_flag` / `request_escalation` are always offered.
+    `submit_flag` / `request_escalation` and the broad web tools are always offered.
     """
     specs = tool_specs()
     if not lane.tools:
         return specs
+    allowed = _ALWAYS_TOOLS | _BROAD_TOOLS
     return [
         s for s in specs
-        if s["function"]["name"] in lane.tools or s["function"]["name"] in _ALWAYS_TOOLS
+        if s["function"]["name"] in lane.tools or s["function"]["name"] in allowed
     ]
 
 
@@ -124,6 +131,8 @@ class AgentWorker(Worker):
         shell_timeout: int = 30,
         checkpoint_every: int = 8,
         role: str = "triage",
+        searcher=None,
+        reader=None,
     ) -> None:
         super().__init__(
             lane, chall, channel,
@@ -133,7 +142,10 @@ class AgentWorker(Worker):
         self.role = role
         self.model = model
         self.sandbox = sandbox
-        self.toolbox = Toolbox(workdir, shell_timeout, skills_dir=str(SKILLS_DIR))
+        self.toolbox = Toolbox(
+            workdir, shell_timeout, skills_dir=str(SKILLS_DIR),
+            searcher=searcher, reader=reader,
+        )
         self.max_steps = max_steps
         self.max_tokens = max_tokens
         self.checkpoint_every = checkpoint_every
@@ -185,6 +197,12 @@ class AgentWorker(Worker):
             },
         ])
         specs = _specs_for_lane(self.lane)
+        # Drop web tools the host hasn't configured (no search provider -> no
+        # web_search; reader is keyless so it normally stays).
+        if self.toolbox.searcher is None:
+            specs = [s for s in specs if s["function"]["name"] != "web_search"]
+        if self.toolbox.reader is None:
+            specs = [s for s in specs if s["function"]["name"] != "read_url"]
         budget_bonus = 0
 
         while True:

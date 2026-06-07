@@ -59,21 +59,33 @@ def assistant_message(reply: Reply) -> dict:
 
 
 class DeepSeekClient:
-    """OpenAI-compatible chat client for DeepSeek (or any compatible endpoint)."""
+    """OpenAI-compatible chat client for DeepSeek (or any compatible endpoint).
 
-    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+    `thinking=True` turns on V4's reasoning mode via the documented extra_body
+    switch (`{"thinking": {"type": "enabled"}}`) - SAME per-token rate as
+    non-thinking flash, it just emits reasoning tokens. The CoT comes back in
+    `reasoning_content`; we read only `content` + tool_calls and never echo the
+    CoT back (DeepSeek regenerates it - echoing it would 400). Codex (OpenAI)
+    leaves this off; it would reject the param.
+    """
+
+    def __init__(self, api_key: str, base_url: str, model: str, *, thinking: bool = False) -> None:
         from openai import AsyncOpenAI  # lazy: sim doesn't need it
 
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self._thinking = thinking
 
     async def chat(self, messages: list[dict], tools: list[dict]) -> Reply:
-        resp = await self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools or None,
-            tool_choice="auto" if tools else None,
-        )
+        kwargs: dict = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools or None,
+            "tool_choice": "auto" if tools else None,
+        }
+        if self._thinking:
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        resp = await self._client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
         calls: list[ToolCall] = []
         for tc in msg.tool_calls or []:

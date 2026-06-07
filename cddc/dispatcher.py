@@ -104,6 +104,16 @@ class Dispatcher:
                     config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
                     docker_sock=sock or None,
                 )
+            # Web tools (provider-agnostic): DDG default / Serper keyed search +
+            # Jina extraction. None searcher (provider="none") -> tool withheld.
+            from . import search
+
+            searcher = search.make_searcher(
+                config.WEB_SEARCH_PROVIDER,
+                serper_key=config.SERPER_API_KEY,
+                num_results=config.WEB_SEARCH_RESULTS,
+            )
+            reader = search.make_reader(jina_key=config.JINA_API_KEY)
             worker: Worker = AgentWorker(
                 lane,
                 chall,
@@ -121,6 +131,8 @@ class Dispatcher:
                 shell_timeout=config.SHELL_TIMEOUT,
                 checkpoint_every=config.AGENT_CHECKPOINT,
                 role=role,
+                searcher=searcher,
+                reader=reader,
             )
         elif kind == "harness":
             from .harness import TmuxHarness, credential_mounts

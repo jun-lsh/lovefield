@@ -41,7 +41,32 @@ def tool_specs() -> list[dict]:
         _spec(
             "fetch_url",
             "Download a URL and return its text, truncated. Direct fetch only "
-            "(no search engine).",
+            "(no search engine). Use this for the challenge's OWN target/host; "
+            "use read_url for public reference pages.",
+            {"url": {"type": "string"}},
+            ["url"],
+        ),
+        _spec(
+            "web_search",
+            "Search the web (Google via Serper, or DuckDuckGo) and return ranked "
+            "title/url/snippet results. Use it to look up a CVE, library version, "
+            "error string, attack name, or find a writeup. To read a result's "
+            "full page, follow up with read_url.",
+            {
+                "query": {"type": "string"},
+                "num_results": {
+                    "type": "integer",
+                    "description": "how many results, default 5 (max 10)",
+                },
+            },
+            ["query"],
+        ),
+        _spec(
+            "read_url",
+            "Fetch a PUBLIC web page (docs, writeup, CVE entry) and return clean "
+            "extracted text via a reader service - better than fetch_url for "
+            "bot-blocked or heavy pages. Use fetch_url for the challenge's own "
+            "target/host instead (a reader can't reach internal/localhost).",
             {"url": {"type": "string"}},
             ["url"],
         ),
@@ -120,12 +145,19 @@ class Toolbox:
     otherwise run_shell runs on the host with no isolation.
     """
 
-    def __init__(self, workdir: str, shell_timeout: int = 30, *, sandbox=None, skills_dir: str | None = None,) -> None:
+    def __init__(self, workdir: str, shell_timeout: int = 30, *, sandbox=None, skills_dir: str | None = None,
+                 searcher=None, reader=None) -> None:
         self.workdir = pathlib.Path(workdir)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.shell_timeout = shell_timeout
         self.sandbox = sandbox
         self.skills_dir = pathlib.Path(skills_dir).resolve() if skills_dir else None
+        # Injected async callables (cddc.search factories): searcher(query, num)
+        # -> [{title,url,snippet}], reader(url) -> clean text. None = that tool is
+        # unconfigured (the handler returns a clear message; the worker also drops
+        # it from the advertised specs).
+        self.searcher = searcher
+        self.reader = reader
 
     async def run(self, name: str, args: dict) -> str:
         try:
@@ -137,6 +169,10 @@ class Toolbox:
                 return self._write(str(args.get("path", "")), str(args.get("content", "")))
             if name == "fetch_url":
                 return await self._fetch(str(args.get("url", "")))
+            if name == "web_search":
+                return await self._web_search(str(args.get("query", "")), args.get("num_results"))
+            if name == "read_url":
+                return await self._read_url(str(args.get("url", "")))
             if name == "list_skill_docs":
                 return self._list_skill_docs(str(args.get("path", "")))
             if name == "read_skill_doc":
@@ -229,6 +265,36 @@ class Toolbox:
             return _truncate(await asyncio.to_thread(_get))
         except Exception as e:
             return f"fetch error: {e!r}"
+
+    async def _web_search(self, query: str, num) -> str:
+        if self.searcher is None:
+            return "web_search not configured (set CDDC_WEB_SEARCH=ddg|serper)"
+        if not query.strip():
+            return "(empty query)"
+        try:
+            results = await self.searcher(query, num)
+        except Exception as e:
+            return f"search error: {e!r}"
+        if not results:
+            return "(no results)"
+        lines = []
+        for i, r in enumerate(results, 1):
+            block = f"{i}. {r.get('title', '')}\n   {r.get('url', '')}"
+            snip = (r.get("snippet") or "").strip()
+            if snip:
+                block += f"\n   {snip}"
+            lines.append(block)
+        return _truncate("\n".join(lines))
+
+    async def _read_url(self, url: str) -> str:
+        if self.reader is None:
+            return "read_url not configured"
+        if not url.strip():
+            return "(empty url)"
+        try:
+            return _truncate(await self.reader(url))
+        except Exception as e:
+            return f"read error: {e!r}"
 
 
 def _truncate(s: str, n: int = MAX_OUTPUT) -> str:

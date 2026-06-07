@@ -89,8 +89,13 @@ AGENT_PROVIDER = _envs("CDDC_PROVIDER", "deepseek").lower()
 # DeepSeek (OpenAI-compatible).
 DEEPSEEK_API_KEY = _envs("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = _envs("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-# deepseek-chat = v4-flash non-thinking (cheapest churn). Override per taste.
-CHURN_MODEL = _envs("CDDC_CHURN_MODEL", "deepseek-chat")
+# deepseek-v4-flash: $0.14/$0.28 per M (cache hits 98% off). The old deepseek-chat
+# / deepseek-reasoner aliases DEPRECATE 2026-07-24, so use the v4 IDs directly.
+# CHURN_THINKING toggles V4 reasoning mode (SAME per-token rate, just more tokens)
+# - ON by default since the DeepSeek tier IS triage, which writes the difficulty
+# report and shouldn't rabbit-hole. Flip off for a dumb high-volume churn tier.
+CHURN_MODEL = _envs("CDDC_CHURN_MODEL", "deepseek-v4-flash")
+CHURN_THINKING = _envs("CDDC_CHURN_THINKING", "1").lower() not in ("0", "false", "no", "")
 
 # Claude (Anthropic Messages API).
 ANTHROPIC_API_KEY = _envs("ANTHROPIC_API_KEY", "")
@@ -179,6 +184,17 @@ def docker_sock_for_role(role: str) -> str:
     if (role or "").strip().lower() == "triage" and not TRIAGE_SOCKET:
         return ""
     return DOCKER_SOCK
+
+# --- web_search / read_url tools (provider-agnostic) -----------------------
+# Default DuckDuckGo (no key, works for every teammate out of the box); set to
+# "serper" + a key for Google-quality at fleet scale, or "none" to disable the
+# tool. read_url extraction uses Jina Reader (r.jina.ai) - no key required, a key
+# only lifts rate limits. Mirrors the AGENT_PROVIDER seam; see cddc/search.py.
+WEB_SEARCH_PROVIDER = _envs("CDDC_WEB_SEARCH", "ddg").lower()
+SERPER_API_KEY = _envs("SERPER_API_KEY", "")
+JINA_API_KEY = _envs("JINA_API_KEY", "")
+WEB_SEARCH_RESULTS = int(_envs("CDDC_WEB_SEARCH_RESULTS", "5"))
+
 
 def category_for_channel(channel_name: str) -> str:
     key = (channel_name or "").strip().lower().lstrip("#")
