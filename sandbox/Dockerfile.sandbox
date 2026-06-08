@@ -154,44 +154,8 @@ RUN printf '%s\n' \
     'user: ctf (non-root; for CLIs that refuse to run as root)' \
     > /opt/cddc-harness.txt
 
-# ── web layer: Node/npm/browser-facing helpers ──────────────────────────────
-FROM harness AS web
-
-# Jeopardy web = craft ONE precise request + analyze the response, not scan/brute.
-# So: HTTP clients, parsers, a callback listener, JWT tooling - NO scanners
-# (sqlmap/ffuf/nuclei/nmap/etc.). nodejs/npm come from harness (proto-pollution /
-# JS deserialization). Lean + low in the chain, so every lane inherits it.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        dnsutils \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m pip install --no-cache-dir \
-        beautifulsoup4 \
-        flask \
-        httpx \
-        lxml \
-        name-that-hash \
-        pyjwt \
-        requests \
-        websocket-client
-
-# jwt_tool - forge / tamper / analyze JWTs (git tool; wrapper on PATH).
-RUN GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/ticarpi/jwt_tool /opt/jwt_tool \
-    && python3 -m pip install --no-cache-dir -r /opt/jwt_tool/requirements.txt \
-    && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
-    && chmod +x /usr/local/bin/jwt_tool
-
-RUN printf '%s\n' \
-    'web layer installed' \
-    'apt: dnsutils (dig)' \
-    'pip: requests, httpx, beautifulsoup4, lxml, pyjwt, flask, websocket-client, name-that-hash' \
-    'git: jwt_tool (/usr/local/bin/jwt_tool)' \
-    'nodejs/npm from harness; NO scanners/brute (jeopardy = craft, not fuzz)' \
-    > /opt/cddc-web.txt
-
 # ── crypto layer: SageMath, hashcat, John, math tooling ─────────────────────
-FROM web AS crypto
+FROM harness AS crypto
 
 # Crypto tooling: CAS/math, password cracking, RSA attack automation, and
 # Python helpers commonly used in CTF crypto solves.
@@ -237,11 +201,49 @@ RUN printf '%s\n' \
     'git: /opt/RsaCtfTool' \
     > /opt/cddc-crypto.txt
 
+# ── web layer: Node/npm/browser-facing helpers ──────────────────────────────
+FROM crypto AS web
+
+# Jeopardy web = craft ONE precise request + analyze the response, not scan/brute.
+# So: HTTP clients, parsers, a callback listener, JWT tooling - NO scanners
+# (sqlmap/ffuf/nuclei/nmap/etc.). nodejs/npm come from harness (proto-pollution /
+# JS deserialization). Kept above crypto now, so web-specific tools don't land
+# in a lean `--target crypto` build.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        dnsutils \
+        golang-go \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir \
+        beautifulsoup4 \
+        flask \
+        httpx \
+        lxml \
+        name-that-hash \
+        pyjwt \
+        requests \
+        websocket-client
+
+# jwt_tool - forge / tamper / analyze JWTs (git tool; wrapper on PATH).
+RUN GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/ticarpi/jwt_tool /opt/jwt_tool \
+    && python3 -m pip install --no-cache-dir -r /opt/jwt_tool/requirements.txt \
+    && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
+    && chmod +x /usr/local/bin/jwt_tool
+
+RUN printf '%s\n' \
+    'web layer installed' \
+    'apt: dnsutils (dig), golang-go (go)' \
+    'pip: requests, httpx, beautifulsoup4, lxml, pyjwt, flask, websocket-client, name-that-hash' \
+    'git: jwt_tool (/usr/local/bin/jwt_tool)' \
+    'nodejs/npm from harness; NO scanners/brute (jeopardy = craft, not fuzz)' \
+    > /opt/cddc-web.txt
+
 # ── stego layer: light media/stego forensics ───────────────────────────────
 # Kept BELOW pwn/rev so a stego box stays lean (no Ghidra/.NET/angr). The HEAVY
 # disk/memory/Windows forensics (sleuthkit, volatility3, EZ tools) live in the
 # `forens` layer above rev. `ruby` lives here (zsteg); pwn inherits it for its gems.
-FROM crypto AS stego
+FROM web AS stego
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

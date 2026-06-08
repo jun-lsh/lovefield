@@ -4,7 +4,7 @@ CDDC SANDBOX PLACEHOLDER TOOLING
 All layers are implemented. Lighter/more-shared lanes sit low (every higher target
 inherits them); heavy/niche lanes sit high so a lean `--target` stays small.
 
-Chain: base -> recon -> harness -> web -> crypto -> stego -> pwn -> rev -> forens -> ai
+Chain: base -> recon -> harness -> crypto -> web -> stego -> pwn -> rev -> forens -> ai
 
 Build:
   docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox sandbox
@@ -45,17 +45,6 @@ recon
     lane depth (pwntools, angr, Ghidra, volatility3, torch) stays in pwn/rev/
     forens/ai, NOT here.
 
-web
-  Present now:
-    nodejs, npm (from harness), dnsutils
-    pip: requests, httpx, beautifulsoup4, lxml, pyjwt, flask, websocket-client, name-that-hash
-    jwt_tool (/usr/local/bin/jwt_tool)
-  Purpose:
-    Jeopardy web: craft a precise request + analyze the response, host an OOB
-    listener (flask), tamper JWTs. NO scanners/brute-forcers (sqlmap/ffuf/nuclei/
-    nmap) - that's pentest tooling, ill-suited to jeopardy. Lean + low in the
-    chain so every lane inherits it.
-
 crypto
   Present now:
     sagemath, hashcat, john, openssl, pari-gp
@@ -64,6 +53,17 @@ crypto
   Purpose:
     Math/CAS workflows, RSA automation, cracking helpers, and Python crypto
     scripts.
+
+web
+  Present now:
+    nodejs, npm (from harness), dnsutils, go
+    pip: requests, httpx, beautifulsoup4, lxml, pyjwt, flask, websocket-client, name-that-hash
+    jwt_tool (/usr/local/bin/jwt_tool)
+  Purpose:
+    Jeopardy web: craft a precise request + analyze the response, host an OOB
+    listener (flask), tamper JWTs. NO scanners/brute-forcers (sqlmap/ffuf/nuclei/
+    nmap) - that's pentest tooling, ill-suited to jeopardy. Sits above crypto so
+    a lean `--target crypto` build avoids web-specific tooling.
 
 stego
   Present now:
