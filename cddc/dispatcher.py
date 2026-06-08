@@ -108,6 +108,7 @@ class Dispatcher:
                     config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
                     docker_sock=sock or None,
                     mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
+                    gpu=config.CDDC_SANDBOX_GPU,
                 )
             # Web tools (provider-agnostic): DDG default / Serper keyed search +
             # Jina extraction. None searcher (provider="none") -> tool withheld.
@@ -164,6 +165,7 @@ class Dispatcher:
                 config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
                 extra_mounts=creds, docker_sock=sock or None,
                 mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
+                gpu=config.CDDC_SANDBOX_GPU,
             )
             session = TmuxHarness(
                 which, sandbox, workdir,

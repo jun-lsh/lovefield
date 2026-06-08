@@ -1,10 +1,10 @@
 CDDC SANDBOX PLACEHOLDER TOOLING
 ================================
 
-This image is intentionally staged. Recon, web, and crypto are implemented; the
-heavy specialist lane layers (pwn/rev/forens/ai) are still placeholders.
+All layers are implemented. Lighter/more-shared lanes sit low (every higher target
+inherits them); heavy/niche lanes sit high so a lean `--target` stays small.
 
-Chain: base -> recon -> harness -> web -> crypto -> pwn -> rev -> forens -> ai
+Chain: base -> recon -> harness -> web -> crypto -> stego -> pwn -> rev -> forens -> ai
 
 Build:
   docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox sandbox
@@ -47,9 +47,14 @@ recon
 
 web
   Present now:
-    nodejs, npm
+    nodejs, npm (from harness), dnsutils
+    pip: requests, httpx, beautifulsoup4, lxml, pyjwt, flask, websocket-client, name-that-hash
+    jwt_tool (/usr/local/bin/jwt_tool)
   Purpose:
-    JavaScript/npm workflows for web challenges.
+    Jeopardy web: craft a precise request + analyze the response, host an OOB
+    listener (flask), tamper JWTs. NO scanners/brute-forcers (sqlmap/ffuf/nuclei/
+    nmap) - that's pentest tooling, ill-suited to jeopardy. Lean + low in the
+    chain so every lane inherits it.
 
 crypto
   Present now:
@@ -60,24 +65,65 @@ crypto
     Math/CAS workflows, RSA automation, cracking helpers, and Python crypto
     scripts.
 
+stego
+  Present now:
+    steghide, stegseek (fast cracker), outguess, zsteg (gem), binwalk, foremost
+    exiftool, imagemagick, ffmpeg, sox, pngcheck, zbar-tools, qrencode, tesseract
+    ruby, p7zip; pip: pillow, numpy, matplotlib, stego-lsb
+  Purpose:
+    Lightweight stego + media forensics. Sits BELOW pwn/rev so a stego box stays
+    lean (no Ghidra/.NET/angr). Heavy disk/memory/Windows forensics is in `forens`.
+    ruby lives here (zsteg); pwn inherits it for one_gadget/seccomp-tools.
+
 pwn
-  Placeholder for:
-    gdb, ltrace, strace, binutils, gcc/g++, make, cmake, patchelf
-    pwntools, ropgadget, capstone, unicorn
+  Present now:
+    gdb (+ gdb-multiarch, gdbserver), strace, ltrace, socat, netcat-openbsd
+    gcc-multilib, qemu-user-static, qemu-system-x86, cpio (kernel pwn), ruby
+    pip: pwntools, angr, angrop, ROPgadget, ropper, capstone, unicorn, keystone-engine
+    gems: one_gadget, seccomp-tools
+    bata24/gef at /opt/gef (system gdbinit); pwninit at /usr/local/bin
+    /opt/glibc-all-in-one + /opt/libc-database (libc fetch/ID; DBs on demand)
+  Purpose:
+    Binary exploitation: debug, trace, ROP, symbolic exec, and libc-matching.
+    (binutils/gcc/patchelf/radare2 come from recon.) A pwn SPECIALIST also gets
+    the docker socket -> `docker compose up` the challenge for the exact libc/ld.
+  Agents fill gaps at runtime (pip/apt/gem inside the container).
 
 rev
-  Placeholder for:
-    radare2/rizin, angr, lief, pyelftools, Java for Ghidra headless
-    optional mounted commercial/free reversing tools
+  Present now:
+    Ghidra 12.1 headless (ghidra-headless) + GolangAnalyzer 1.3.0 extension
+    ghidra-rpc - Ghidra-as-a-JSON-daemon, the agent's decompile interface
+    pip: lief, pefile, pyelftools, frida-tools, qiling, uncompyle6, flare-floss
+    pycdc/pycdas (py3.9+ bytecode), jadx (Android), ilspycmd (.NET, via dotnet-sdk-8.0)
+    apt: openjdk-21, apktool, upx, cmake, gcc cross (aarch64/arm)
+    (radare2 from recon; angr/capstone/unicorn/keystone from pwn)
+    oxidizer (Rust decomp): repo at /opt/oxidizer, run as a container via the socket
+  Purpose:
+    Decompilation, emulation, dynamic instrumentation, .NET + Android + Go + Rust.
+  Note: when forens is reordered below pwn/rev, .NET + ilspycmd move down to forens
+    (shared with Eric Zimmerman tools) and rev inherits them.
 
-forens
-  Placeholder for:
-    binwalk, exiftool, foremost, sleuthkit, testdisk
-    pngcheck, imagemagick, ffmpeg, sox, zsteg, volatility3
+forens (HEAVY - disk / memory / Windows, above rev)
+  Present now:
+    apt: sleuthkit, testdisk, tshark, pcapfix, ntfs-3g
+    pip: volatility3
+    Eric Zimmerman (.NET 9): MFTECmd/EvtxECmd/RECmd baked best-effort; net9 runtime
+      installed. Pull more / re-pull via Get-ZimmermanTools - see /opt/cddc-forens.txt
+  Purpose:
+    Disk images, memory dumps, pcaps, Windows artifacts. Light stego/media
+    carving lives in the `stego` layer (below pwn/rev), not here.
 
-ai
-  Placeholder for:
-    numpy, scipy, scikit-learn, CPU torch, keras, transformers, datasets
+ai (top of chain - heaviest, ISOLATED venv)
+  Present now:
+    venv at /opt/ai-venv - run with `ai-python` (NOT system python3):
+      torch + torchvision (GPU/CUDA default; --build-arg TORCH_VARIANT=cpu to slim),
+      scipy, scikit-learn, pandas, transformers, safetensors
+    apt: libgomp1
+  Purpose:
+    ML/LLM challenges, isolated so its modern numpy/scipy never clash with Sage's
+    1.x in the system python. GPU when the host exposes one (CDDC_SANDBOX_GPU=1 ->
+    docker --gpus all, needs nvidia-container-toolkit); CPU fallback otherwise.
+    Only --target ai / the full image pays for the weight.
 
 harness
   Present now:

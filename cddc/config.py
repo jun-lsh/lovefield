@@ -193,6 +193,10 @@ CDDC_SANDBOX_MOUNT_FLAG = _envs("CDDC_SANDBOX_MOUNT_FLAG", "").strip().lstrip(":
 # triage (the "exception" knob, off by default).
 DOCKER_SOCK = _envs("CDDC_DOCKER_SOCK", "/var/run/docker.sock")
 TRIAGE_SOCKET = _envs("CDDC_TRIAGE_SOCKET", "0").lower() in ("1", "true", "yes")
+# Pass the host GPU into the sandbox (docker --gpus all) so the ai lane's CUDA
+# torch can use it. Needs the NVIDIA driver + nvidia-container-toolkit on the host;
+# off by default (most hosts have no GPU, and the flag errors without the toolkit).
+CDDC_SANDBOX_GPU = _envs("CDDC_SANDBOX_GPU", "0").lower() in ("1", "true", "yes")
 
 
 def docker_sock_for_role(role: str) -> str:

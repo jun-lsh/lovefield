@@ -72,6 +72,7 @@ async def run(args: argparse.Namespace) -> None:
             config.CDDC_SANDBOX_IMAGE, thread_id, workdir,
             docker_sock=config.docker_sock_for_role(args.role) or None,
             mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
+            gpu=config.CDDC_SANDBOX_GPU,
         )
 
     searcher = search.make_searcher(

@@ -157,10 +157,37 @@ RUN printf '%s\n' \
 # ── web layer: Node/npm/browser-facing helpers ──────────────────────────────
 FROM harness AS web
 
+# Jeopardy web = craft ONE precise request + analyze the response, not scan/brute.
+# So: HTTP clients, parsers, a callback listener, JWT tooling - NO scanners
+# (sqlmap/ffuf/nuclei/nmap/etc.). nodejs/npm come from harness (proto-pollution /
+# JS deserialization). Lean + low in the chain, so every lane inherits it.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        dnsutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir \
+        beautifulsoup4 \
+        flask \
+        httpx \
+        lxml \
+        name-that-hash \
+        pyjwt \
+        requests \
+        websocket-client
+
+# jwt_tool - forge / tamper / analyze JWTs (git tool; wrapper on PATH).
+RUN GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/ticarpi/jwt_tool /opt/jwt_tool \
+    && python3 -m pip install --no-cache-dir -r /opt/jwt_tool/requirements.txt \
+    && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
+    && chmod +x /usr/local/bin/jwt_tool
+
 RUN printf '%s\n' \
     'web layer installed' \
-    'apt: nodejs, npm' \
-    'TODO: add chromium/browser tooling, HTTP helpers, JWT helpers as needed' \
+    'apt: dnsutils (dig)' \
+    'pip: requests, httpx, beautifulsoup4, lxml, pyjwt, flask, websocket-client, name-that-hash' \
+    'git: jwt_tool (/usr/local/bin/jwt_tool)' \
+    'nodejs/npm from harness; NO scanners/brute (jeopardy = craft, not fuzz)' \
     > /opt/cddc-web.txt
 
 # ── crypto layer: SageMath, hashcat, John, math tooling ─────────────────────
@@ -210,62 +237,330 @@ RUN printf '%s\n' \
     'git: /opt/RsaCtfTool' \
     > /opt/cddc-crypto.txt
 
-# ── pwn layer: debuggers, exploit helpers, native build tooling ─────────────
-FROM crypto AS pwn
+# ── stego layer: light media/stego forensics ───────────────────────────────
+# Kept BELOW pwn/rev so a stego box stays lean (no Ghidra/.NET/angr). The HEAVY
+# disk/memory/Windows forensics (sleuthkit, volatility3, EZ tools) live in the
+# `forens` layer above rev. `ruby` lives here (zsteg); pwn inherits it for its gems.
+FROM crypto AS stego
 
-# TODO: install pwn tooling when needed.
-# Suggested apt packages:
-#   gdb ltrace strace binutils gcc g++ make cmake patchelf socat netcat-openbsd
-# Suggested Python packages:
-#   pwntools ropgadget capstone unicorn
-# Optional debugger plugins:
-#   gef pwndbg peda
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        binwalk \
+        ffmpeg \
+        foremost \
+        imagemagick \
+        libimage-exiftool-perl \
+        outguess \
+        p7zip-full \
+        pngcheck \
+        qrencode \
+        ruby \
+        ruby-dev \
+        sox \
+        steghide \
+        tesseract-ocr \
+        zbar-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# numpy pinned <2 in the SYSTEM python ONLY: SageMath ships an apt scipy compiled
+# against numpy 1.x, so a pip numpy 2.x here would break Sage's ABI. This does NOT
+# constrain the ML stack - that lives in its own venv (see the ai layer). These
+# light image tools are happy on 1.x anyway.
+RUN python3 -m pip install --no-cache-dir \
+        matplotlib \
+        "numpy<2" \
+        pillow \
+        stego-lsb
+
+RUN gem install --no-document zsteg
+
+# stegseek - fast steghide passphrase cracker (latest .deb; its libjpeg/mcrypt deps
+# already came in with steghide above).
+RUN url=$(curl -fsSL https://api.github.com/repos/RickdeJager/stegseek/releases/latest \
+        | jq -r '.assets[] | select(.name | endswith(".deb")) | .browser_download_url' | head -1) \
+    && curl -fsSL -o /tmp/stegseek.deb "$url" \
+    && apt-get update && apt-get install -y --no-install-recommends /tmp/stegseek.deb \
+    && rm -rf /tmp/stegseek.deb /var/lib/apt/lists/*
+
 RUN printf '%s\n' \
-    'pwn layer placeholder' \
-    'TODO: add gdb, ltrace, strace, binutils, build tools, pwntools, ropgadget' \
+    'stego layer installed' \
+    'apt: steghide, stegseek, outguess, binwalk, foremost, exiftool, imagemagick, ffmpeg, sox, pngcheck, zbar-tools, qrencode, tesseract, ruby, p7zip' \
+    'pip: pillow, numpy, matplotlib, stego-lsb' \
+    'gems: zsteg' \
+    'purpose: lightweight stego + media forensics (stays below pwn/rev)' \
+    > /opt/cddc-stego.txt
+
+# ── pwn layer: debuggers, exploit helpers, libc-matching, kernel pwn ────────
+# Agents/Claude can pip/apt more at runtime; this is the high-frequency base.
+# gcc/g++/make/binutils/patchelf/radare2 come from recon; ruby from stego.
+FROM stego AS pwn
+
+# Debuggers (+ multiarch + server), tracing, networking, 32-bit + foreign-arch
+# run support (qemu-user), kernel-pwn boot (qemu-system + cpio).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        cpio \
+        gcc-multilib \
+        gdb \
+        gdb-multiarch \
+        gdbserver \
+        libc6-dbg \
+        ltrace \
+        netcat-openbsd \
+        qemu-system-x86 \
+        qemu-user-static \
+        socat \
+        strace \
+    && rm -rf /var/lib/apt/lists/*
+
+# pwntools + symbolic execution (angr/angrop) + ROP/assembly/emulation engines.
+RUN python3 -m pip install --no-cache-dir \
+        angr \
+        angrop \
+        capstone \
+        keystone-engine \
+        pwntools \
+        ROPgadget \
+        ropper \
+        unicorn
+
+# one_gadget (magic execve one-shots) + seccomp-tools (dump/diff seccomp filters).
+RUN gem install --no-document one_gadget seccomp-tools
+
+# bata24/gef - the kernel/heap-strong GEF fork. Sourced from the system gdbinit so
+# every user's gdb loads it (Ubuntu gdb reads /etc/gdb/gdbinit).
+RUN git clone --depth=1 https://github.com/bata24/gef /opt/gef \
+    && mkdir -p /etc/gdb \
+    && echo 'source /opt/gef/gef.py' > /etc/gdb/gdbinit
+
+# pwninit - auto-patch a challenge binary onto its matching libc/ld (prebuilt
+# static binary; uses patchelf from the recon layer).
+RUN curl -fsSL -o /usr/local/bin/pwninit \
+        https://github.com/io12/pwninit/releases/latest/download/pwninit \
+    && chmod 0755 /usr/local/bin/pwninit
+
+# libc helpers (scripts only - the multi-GB libcs/DBs are fetched on demand via
+# ./download and ./get, or use the libc.rip API online):
+#   glibc-all-in-one - grab an exact libc version + its debug symbols
+#   libc-database    - identify a libc from a leaked address + dump offsets
+# GIT_TERMINAL_PROMPT=0 so a bad/renamed URL fails fast instead of hanging on a
+# credential prompt in the non-interactive build.
+RUN GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/matrix1001/glibc-all-in-one /opt/glibc-all-in-one \
+    && GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/niklasb/libc-database /opt/libc-database
+
+RUN printf '%s\n' \
+    'pwn layer installed' \
+    'apt: gdb(+multiarch/server), strace, ltrace, socat, netcat, qemu-user/system-x86, cpio, gcc-multilib, ruby' \
+    'pip: pwntools, angr, angrop, ROPgadget, ropper, capstone, unicorn, keystone-engine' \
+    'gems: one_gadget, seccomp-tools' \
+    'gef: bata24 fork at /opt/gef (system gdbinit)' \
+    'pwninit: /usr/local/bin/pwninit' \
+    'libc: /opt/glibc-all-in-one, /opt/libc-database (DBs fetched on demand; or libc.rip)' \
+    'note: a pwn specialist also gets the docker socket -> `docker compose up` the' \
+    '      challenge container for the exact libc/ld environment' \
     > /opt/cddc-pwn.txt
 
-# ── rev layer: reversing, emulation, decompilation helpers ──────────────────
+# ── rev layer: decompilation, emulation, .NET, dynamic instrumentation ──────
+# Heavy lane. radare2/gdb/angr/capstone/unicorn come from recon+pwn below. Steps
+# are ordered reliable -> fragile so a failure caches the cheap layers. (.NET +
+# ilspycmd live here for now; they move down to forens when we reorder the chain.)
 FROM pwn AS rev
 
-# TODO: install reverse-engineering tooling when needed.
-# Suggested apt packages:
-#   radare2 rizin binutils default-jre-headless
-# Suggested Python packages:
-#   angr capstone unicorn lief pyelftools
-# Optional mounted tools:
-#   Ghidra, Binary Ninja, IDA freeware/headless
+ARG GHIDRA_VERSION=12.1
+ARG GOLANG_EXT_VERSION=1.3.0
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
+
+# apt: JDK (Ghidra/jadx/apktool), unpackers, Android, cmake (pycdc), cross-gcc,
+# .NET SDK (ilspycmd now; Eric Zimmerman tools later in forens).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        apktool \
+        cmake \
+        dotnet-sdk-8.0 \
+        gcc-aarch64-linux-gnu \
+        gcc-arm-linux-gnueabihf \
+        openjdk-21-jdk-headless \
+        upx-ucl \
+    && rm -rf /var/lib/apt/lists/*
+
+# pip: PE/ELF parsing, dynamic instrumentation, emulation, python decompile, FLOSS.
+RUN python3 -m pip install --no-cache-dir \
+        flare-floss \
+        frida-tools \
+        lief \
+        pefile \
+        pyelftools \
+        qiling \
+        uncompyle6
+
+# pycdc / pycdas - Python 3.9+ bytecode decompiler (uncompyle6 only does <=3.8).
+RUN git clone --depth=1 https://github.com/zrax/pycdc /tmp/pycdc \
+    && cmake -S /tmp/pycdc -B /tmp/pycdc/build \
+    && cmake --build /tmp/pycdc/build --target pycdc pycdas \
+    && install -m0755 /tmp/pycdc/build/pycdc /usr/local/bin/pycdc \
+    && install -m0755 /tmp/pycdc/build/pycdas /usr/local/bin/pycdas \
+    && rm -rf /tmp/pycdc
+
+# jadx - Android dex -> java decompiler (latest release).
+RUN url=$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest \
+        | jq -r '.assets[] | select(.name | test("^jadx-[0-9].*\\.zip$")) | .browser_download_url' | head -1) \
+    && curl -fsSL -o /tmp/jadx.zip "$url" \
+    && unzip -q /tmp/jadx.zip -d /opt/jadx \
+    && ln -sf /opt/jadx/bin/jadx /usr/local/bin/jadx \
+    && rm /tmp/jadx.zip
+
+# ilspycmd - .NET decompiler CLI (global tool installed to PATH; uses dotnet-sdk).
+# Pin to the net8-era 8.x line: the latest ilspycmd targets a newer .NET than our
+# SDK 8.0, which fails with "DotnetToolSettings.xml not found".
+RUN dotnet tool install --tool-path /usr/local/bin ilspycmd --version "8.*"
+
+# Ghidra - PINNED 12.1 (must match the GolangAnalyzer build below; ghidra-rpc's
+# PyGhidra needs 11.3+). Release zip resolved via the API by tag.
+RUN url=$(curl -fsSL "https://api.github.com/repos/NationalSecurityAgency/ghidra/releases/tags/Ghidra_${GHIDRA_VERSION}_build" \
+        | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -1) \
+    && curl -fsSL -o /tmp/ghidra.zip "$url" \
+    && unzip -q /tmp/ghidra.zip -d /opt \
+    && rm /tmp/ghidra.zip \
+    && mv /opt/ghidra_*_PUBLIC /opt/ghidra \
+    && ln -sf /opt/ghidra/support/analyzeHeadless /usr/local/bin/ghidra-headless
+
+# GolangAnalyzer extension (version-locked to Ghidra 12.1) -> Ghidra Extensions/.
+RUN url=$(curl -fsSL "https://api.github.com/repos/mooncat-greenpy/Ghidra_GolangAnalyzerExtension/releases/tags/${GOLANG_EXT_VERSION}" \
+        | jq -r --arg v "ghidra_${GHIDRA_VERSION}_PUBLIC" '.assets[] | select(.name | startswith($v)) | .browser_download_url' | head -1) \
+    && curl -fsSL -o /tmp/golang-ext.zip "$url" \
+    && unzip -q /tmp/golang-ext.zip -d /opt/ghidra/Ghidra/Extensions \
+    && rm /tmp/golang-ext.zip
+
+# ghidra-rpc - the AGENT'S decompile interface: runs Ghidra as a JSON daemon via
+# PyGhidra (`ghidra-rpc decompile bin func`). uv brings its own Python 3.11; the
+# tool venv lives in a world-readable dir so the non-root harness user reaches it.
+RUN python3 -m pip install --no-cache-dir uv \
+    && UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
+        uv tool install --python 3.11 git+https://github.com/cellebrite-labs/ghidra-rpc
+
+# oxidizer (Rust decompiler) - its pinned angr deps would clash with ours, so it
+# runs as a SIDECAR CONTAINER via the docker socket. Repo prestaged here; a
+# specialist does `docker build -t oxidizer /opt/oxidizer && docker run ... oxidizer`.
+RUN GIT_TERMINAL_PROMPT=0 git clone --depth=1 https://github.com/sefcom/oxidizer /opt/oxidizer
+
+# Fixups (kept last so they don't bust the cache on the heavy steps above):
+#  - jadx's launcher scripts lose +x through unzip.
+#  - ilspycmd 8.x targets net6; roll it forward onto the net8 runtime we have
+#    (also covers the net6-built Eric Zimmerman tools later).
+RUN chmod +x /opt/jadx/bin/*
+ENV DOTNET_ROLL_FORWARD=LatestMajor
+
 RUN printf '%s\n' \
-    'rev layer placeholder' \
-    'TODO: add radare2/rizin, angr, lief, pyelftools, Java for Ghidra headless' \
+    'rev layer installed' \
+    'apt: openjdk-21, dotnet-sdk-8.0, apktool, upx, cmake, gcc cross (aarch64/arm)' \
+    'pip: lief, pefile, pyelftools, frida-tools, qiling, uncompyle6, flare-floss' \
+    'ghidra: /opt/ghidra 12.1 (ghidra-headless) + GolangAnalyzer 1.3.0 extension' \
+    'ghidra-rpc: JSON decompile daemon at /usr/local/bin/ghidra-rpc (agent interface)' \
+    'decompilers: pycdc/pycdas, jadx, ilspycmd (.NET)' \
+    'oxidizer: repo at /opt/oxidizer -> docker build+run via socket (rust decomp)' \
     > /opt/cddc-rev.txt
 
-# ── forens layer: carving, metadata, stego, disk/memory helpers ─────────────
+# ── forens layer: HEAVY disk / memory / Windows forensics ───────────────────
+# Above rev so it inherits .NET (Eric Zimmerman tools). Light stego/media carving
+# lives down in the `stego` layer; this is the disk-image / memory-dump / pcap /
+# Windows-artifact heavy stuff.
 FROM rev AS forens
 
-# TODO: install forensics tooling when needed.
-# Suggested apt packages:
-#   binwalk exiftool foremost sleuthkit testdisk pngcheck imagemagick ffmpeg sox
-# Suggested Python packages:
-#   Pillow pytesseract volatility3
-# Suggested Ruby gems:
-#   zsteg
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ntfs-3g \
+        pcapfix \
+        sleuthkit \
+        testdisk \
+        tshark \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir volatility3
+
+# Eric Zimmerman tools went .NET 9-only (our SDK is 8.0). Add the net9 RUNTIME
+# (official installer, alongside the apt 8.0 in /usr/lib/dotnet) so EZ tools run -
+# this also satisfies ilspycmd's net6 via roll-forward.
+RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
+    && bash /tmp/dotnet-install.sh --channel 9.0 --runtime dotnet --install-dir /usr/lib/dotnet \
+    && rm /tmp/dotnet-install.sh
+
+# Bake MFTECmd/EvtxECmd/RECmd - direct net9 zips from the new host (per the SANS
+# guide). The archive's inner folder + capitalization vary per tool, so the wrapper
+# is located by a case-insensitive .dll search. Best-effort: a miss never breaks the
+# build (net9 runtime is in; the agent re-pulls the same way - see the manifest).
+RUN mkdir -p /opt/eztools \
+    && for t in MFTECmd EvtxECmd RECmd; do \
+         ( curl -fsSL -o /tmp/$t.zip "https://download.ericzimmermanstools.com/net9/$t.zip" \
+           && unzip -q -o /tmp/$t.zip -d /opt/eztools/$t \
+           && dll=$(find /opt/eztools/$t -iname "$t.dll" 2>/dev/null | head -1) \
+           && [ -n "$dll" ] && printf '#!/bin/sh\nexec dotnet "%s" "$@"\n' "$dll" > /usr/local/bin/$t \
+           && chmod +x /usr/local/bin/$t ) || echo "EZ: skipped $t" ; \
+         rm -f /tmp/$t.zip ; \
+       done
+
 RUN printf '%s\n' \
-    'forens layer placeholder' \
-    'TODO: add binwalk, exiftool, sleuthkit, foremost, stego/media tooling' \
+    'forens layer installed' \
+    'apt: sleuthkit, testdisk, tshark, pcapfix, ntfs-3g' \
+    'pip: volatility3' \
+    'EZ tools (.NET 9): MFTECmd/EvtxECmd/RECmd baked best-effort; net9 runtime is in' \
+    'pull more / re-pull on demand (direct net9 zip):' \
+    '  curl -fsSL -o /tmp/T.zip https://download.ericzimmermanstools.com/net9/<Tool>.zip' \
+    '  unzip /tmp/T.zip -d /opt/eztools/<Tool>' \
+    '  dotnet $(find /opt/eztools/<Tool> -iname "<Tool>.dll" | head -1)' \
+    '  (PECmd, SBECmd, LECmd, JLECmd, AmcacheParser, AppCompatCacheParser, ...)' \
+    'note: light stego/media tooling is in the `stego` layer below pwn/rev' \
     > /opt/cddc-forens.txt
 
-# ── ai layer: ML/LLM challenge helpers ──────────────────────────────────────
+# ── ai layer: ML/LLM challenge helpers (CPU-only) ───────────────────────────
+# Top of the chain (heaviest), so only --target ai / the full image pays for it.
 FROM forens AS ai
 
-# TODO: install AI tooling when needed.
-# Suggested Python packages:
-#   numpy scipy scikit-learn torch torchvision keras transformers datasets
-# Optional system packages:
-#   libgomp1 graphviz
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# The ML stack lives in its OWN venv (/opt/ai-venv) so its modern numpy/scipy 2.x
+# never touch SageMath's apt numpy 1.x in the system python - no cross-contamination
+# either way. Run ML/torch code with `ai-python` (= the venv interpreter), and use
+# the venv's own pip directly (foolproof - installs into the venv, no targeting
+# ambiguity).
+#
+# torch: GPU (CUDA) wheel by DEFAULT (runs on CPU too, just larger); a CPU-only box
+# slims it with `--build-arg TORCH_VARIANT=cpu`. The CUDA wheel bundles its own CUDA
+# libs; to actually USE the GPU, run the sandbox with CDDC_SANDBOX_GPU=1 (-> docker
+# --gpus all) on a host with the NVIDIA driver + nvidia-container-toolkit.
+ARG TORCH_VARIANT=gpu
+RUN python3 -m venv /opt/ai-venv \
+    && /opt/ai-venv/bin/pip install --no-cache-dir --upgrade pip \
+    && if [ "$TORCH_VARIANT" = "cpu" ]; then \
+         /opt/ai-venv/bin/pip install --no-cache-dir \
+             --index-url https://download.pytorch.org/whl/cpu torch torchvision ; \
+       else \
+         /opt/ai-venv/bin/pip install --no-cache-dir torch torchvision ; \
+       fi \
+    && /opt/ai-venv/bin/pip install --no-cache-dir \
+         pandas safetensors scikit-learn scipy transformers \
+    && ln -sf /opt/ai-venv/bin/python /usr/local/bin/ai-python
+
+# ai-python must EXEC the real venv interpreter PATH. A bare symlink in /usr/local/bin
+# breaks venv detection (python resolves pyvenv.cfg next to the INVOKED path, doesn't
+# find it, falls back to SYSTEM site-packages -> no torch). Replace it with a wrapper.
+# `rm -f` first: the existing path is a symlink, so a bare `>` would clobber the venv's
+# own python through it. Separate RUN so it doesn't invalidate the slow torch install
+# above; the final import doubles as a fail-fast build check.
+RUN rm -f /usr/local/bin/ai-python \
+    && printf '#!/bin/sh\nexec /opt/ai-venv/bin/python "$@"\n' > /usr/local/bin/ai-python \
+    && chmod +x /usr/local/bin/ai-python \
+    && ai-python -c "import torch, transformers, sklearn, scipy" && echo "ai-venv OK"
+
 RUN printf '%s\n' \
-    'ai layer placeholder' \
-    'TODO: add numpy/scipy/sklearn, CPU torch, keras, transformers as needed' \
+    'ai layer installed (ISOLATED venv at /opt/ai-venv)' \
+    'RUN ML/torch with: ai-python   (= /opt/ai-venv/bin/python, NOT system python3)' \
+    'venv: torch+torchvision (GPU default; --build-arg TORCH_VARIANT=cpu to slim),' \
+    '      scipy, scikit-learn, pandas, transformers, safetensors' \
+    'isolated so its numpy 2.x stays clear of Sage (system numpy stays 1.x)' \
     > /opt/cddc-ai.txt
 
 # Final image includes every layer above.

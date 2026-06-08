@@ -35,6 +35,7 @@ class Sandbox:
         extra_mounts: list[str] | None = None,
         docker_sock: str | None = None,
         mount_flag: str = "",
+        gpu: bool = False,
     ) -> None:
         self.image = image
         self.thread_id = thread_id
@@ -43,6 +44,8 @@ class Sandbox:
         # SELinux relabel flag for the workdir bind-mount ("z"/"Z"); empty = none.
         # Needed only on SELinux-enforcing hosts; a no-op (and a footgun) elsewhere.
         self.mount_flag = (mount_flag or "").strip().lstrip(":")
+        # Expose the host GPU (docker --gpus all) - for the ai lane's CUDA torch.
+        self.gpu = gpu
         # Extra `-v` specs appended to `docker run` (e.g. host credential files
         # for the harness CLIs). Each is a full "src:dst[:opts]" string.
         self.extra_mounts = list(extra_mounts or [])
@@ -98,12 +101,14 @@ class Sandbox:
                 "-e", f"COMPOSE_PROJECT_NAME={self.scope}",
                 "-e", f"CDDC_THREAD={self.thread_id}",
             ]
+        gpu_args = ["--gpus", "all"] if self.gpu else []
         return [
             "run", "-d", "--rm",
             "--name", self.name,
             "-w", self.mount,
             *mount_args,
             *sock_args,
+            *gpu_args,
             self.image,
             "sleep", "infinity",
         ]
