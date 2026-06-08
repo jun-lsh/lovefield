@@ -1,39 +1,31 @@
 ---
 name: ctf-crypto
 description: Provides cryptography attack techniques for CTF challenges. Use when attacking encryption, hashing, signatures, ZKP, PRNG, or mathematical crypto problems involving RSA, AES, ECC, lattices, LWE, CVP, number theory, Coppersmith, Pollard, Wiener, padding oracle, GCM, key derivation, or stream/block cipher weaknesses.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF Cryptography
 
 Quick reference for crypto CTF challenges. Each technique has a one-liner here; see supporting files for full details with code.
 
-## Prerequisites
+## Environment
 
-**Python packages (all platforms):**
-```bash
-pip install pycryptodome z3-solver sympy gmpy2 hashpumpy fpylll py_ecc
+**Linux Packages**
+```
+sagemath 9.5
+hashcat
+john
+RsaCtfTool - under /opt/RsaCtfTool
 ```
 
-**Linux (apt):**
-```bash
-apt install hashcat sagemath
+**Python Libraries**
 ```
-
-**macOS (Homebrew):**
-```bash
-brew install hashcat
+pycryptodome
+sympy
+z3
+gmpy2
+fpylll
+pari-gp
 ```
-
-**Manual install:**
-- SageMath — Linux: `apt install sagemath`, macOS: `brew install --cask sage`
-- RsaCtfTool — `git clone https://github.com/RsaCtfTool/RsaCtfTool` (automated RSA attacks)
-
-> **Note:** `gmpy2` requires libgmp — Linux: `apt install libgmp-dev`, macOS: `brew install gmp`.
 
 ## Additional Resources
 
@@ -56,7 +48,7 @@ brew install hashcat
 
 ---
 
-## When to Pivot
+## When to Switch Lanes
 
 - If the real blocker is understanding a binary, obfuscated client, or weird VM, switch to `/ctf-reverse`.
 - If the challenge is mostly packet carving, disk recovery, or stego extraction before any decryption starts, switch to `/ctf-forensics`.

@@ -1,42 +1,61 @@
 ---
 name: ctf-pwn
 description: Provides binary exploitation techniques for CTF challenges. Use when you already have a vulnerable native target or service and need to turn memory corruption or low-level primitives into code execution or privilege escalation, such as buffer overflows, format strings, heap bugs, ROP, ret2libc, shellcode, kernel exploitation, seccomp bypass, sandbox escape, or Windows/Linux exploit chains. Do not use it when the main blocker is understanding what the binary does; use reverse engineering first. Do not use it for pure web bugs, disk or packet forensics, or standalone crypto/math challenges.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF Binary Exploitation (Pwn)
 
 Quick reference for binary exploitation (pwn) CTF challenges. Each technique has a one-liner here; see supporting files for full details.
 
-## Prerequisites
+## Environment
 
-**Python packages (all platforms):**
-```bash
-pip install pwntools ropper ROPgadget
+**Linux Packages**
+```
+gdb
+gdb-multiarch
+gdbserver
+strace
+ltrace
+socat
+netcat-openbsd
+gcc-multilib
+qemu-user-static
+qemu-system-x86
+cpio
+binutils
+gcc
+g++
+make
+patchelf
+radare2
 ```
 
-**Linux (apt):**
-```bash
-apt install gdb binutils strace ltrace qemu-system-x86
+**Python Libraries**
+```
+pwntools
+angr
+angrop
+ROPgadget
+ropper
+capstone
+unicorn
+keystone-engine
 ```
 
-**macOS (Homebrew):**
-```bash
-brew install gdb binutils qemu
+**Ruby Gems**
+```
+one_gadget
+seccomp-tools
 ```
 
-**Ruby gems (all platforms):**
-```bash
-gem install one_gadget seccomp-tools
+**Installed Tool Repos / Binaries**
 ```
-
-**Manual install:**
-- pwndbg — Linux: [GitHub](https://github.com/pwndbg/pwndbg), macOS: `brew install pwndbg/tap/pwndbg-gdb`
-- checksec — included with pwntools
+gef - bata24 fork, auto-loaded in gdb from /opt/gef
+pwninit - /usr/local/bin/pwninit
+glibc-all-in-one - /opt/glibc-all-in-one
+libc-database - /opt/libc-database
+checksec
+```
 
 ## Additional Resources
 
@@ -61,7 +80,7 @@ gem install one_gadget seccomp-tools
 
 ---
 
-## When to Pivot
+## When to Switch Lanes
 
 - If you do not yet understand what the binary does, switch to `/ctf-reverse` before trying to exploit it.
 - If the service is really a restricted shell, encoding puzzle, or sandbox language challenge, switch to `/ctf-misc`.

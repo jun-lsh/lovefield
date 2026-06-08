@@ -1,41 +1,32 @@
 ---
 name: ctf-web
 description: Provides web exploitation techniques for CTF challenges. Use when the target is primarily an HTTP application, API, browser client, template engine, identity flow, or smart-contract frontend/backend surface, including XSS, SQLi, SSTI, SSRF, XXE, JWT, auth bypass, file upload, request smuggling, OAuth/OIDC, SAML, prototype pollution, and similar web bugs. Do not use it for native binary memory corruption, reverse engineering of standalone executables, disk or memory forensics, or pure cryptanalysis unless the web flaw is still the main path to the flag.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF Web Exploitation
 
 Use this skill as a routing and execution guide for web-heavy challenges. Keep the first pass short: map the app, confirm the trust boundary, and only then dive into the detailed technique notes.
 
-## Prerequisites
+## Environment
 
-**Python packages (all platforms):**
-```bash
-pip install sqlmap flask-unsign requests
+**Python Libraries**
+```
+requests
+httpx
+flask
+websocket-client
+beautifulsoup4
+lxml
+pyjwt
+name-that-hash
 ```
 
-**Linux (apt):**
-```bash
-apt install hashcat jq curl
+**Linux Packages**
 ```
-
-**macOS (Homebrew):**
-```bash
-brew install hashcat jq curl
+dns-utils
+golang-go
+jwt_tool - under /opt/jwt_tool
 ```
-
-**Go tools (all platforms, requires Go):**
-```bash
-go install github.com/ffuf/ffuf/v2@latest
-```
-
-**Manual install:**
-- ysoserial — [GitHub](https://github.com/frohoff/ysoserial), requires Java (Java deserialization payloads)
 
 ## Additional Resources
 

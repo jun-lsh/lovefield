@@ -1,11 +1,6 @@
 ---
 name: ctf-malware
 description: Provides malware analysis and network traffic techniques for CTF challenges. Use when analyzing obfuscated scripts, malicious packages, custom crypto protocols, C2 traffic, PE/.NET binaries, RC4/AES encrypted communications, YARA rules, shellcode analysis, memory forensics for malware (Volatility malfind, process injection detection), anti-analysis techniques (VM/sandbox detection, timing evasion, API hashing, process injection, environment checks), or extracting malware configurations and indicators of compromise.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF Malware & Network Analysis
@@ -41,7 +36,7 @@ brew install wireshark binwalk binutils ghidra
 
 ---
 
-## When to Pivot
+## When to Switch Lanes
 
 - If the sample is really just a normal crackme, packed challenge binary, or custom VM with no malware behavior, switch to `/ctf-reverse`.
 - If the main job is network reconstruction, disk carving, or host artifact recovery, switch to `/ctf-forensics`.

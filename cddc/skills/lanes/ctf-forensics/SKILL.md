@@ -1,40 +1,38 @@
 ---
 name: ctf-forensics
 description: Provides digital forensics and signal analysis techniques for CTF challenges. Use when analyzing disk images, memory dumps, event logs, network captures, cryptocurrency transactions, steganography, PDF analysis, Windows registry, Volatility, PCAP, Docker images, coredumps, side-channel power traces, DTMF audio spectrograms, packet timing analysis, CD audio disc images, or recovering deleted files and credentials.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF Forensics & Blockchain
 
 Quick reference for forensics CTF challenges. Each technique has a one-liner here; see supporting files for full details.
 
-## Prerequisites
+## Environment
 
-**Python packages (all platforms):**
-```bash
-pip install volatility3 Pillow numpy matplotlib
+**Linux Packages**
+```
+tshark
+sleuthkit
+testdisk
+pcapfix
+ntfs-3g
 ```
 
-**Linux (apt):**
-```bash
-apt install binwalk foremost libimage-exiftool-perl tshark sleuthkit \
-  ffmpeg steghide testdisk john pcapfix
+**Python Libraries**
+```
+volatility3
 ```
 
-**macOS (Homebrew):**
-```bash
-brew install binwalk exiftool wireshark sleuthkit ffmpeg \
-  testdisk john-jumbo
+**Installed Tool Repos / Binaries**
+```
+MFTECmd
+EvtxECmd
+RECmd
+dotnet 9 runtime for Eric Zimmerman tools
 ```
 
-**Ruby gems (all platforms):**
-```bash
-gem install zsteg
-```
+Pull more .NET 9 Eric Zimmerman tools on demand using the recipe in
+`/opt/cddc-forens.txt`.
 
 ## Additional Resources
 
@@ -55,7 +53,7 @@ gem install zsteg
 
 ---
 
-## When to Pivot
+## When to Switch Lanes
 
 - If you recover an encrypted blob and the hard part becomes RSA, AES, or lattice work, switch to `/ctf-crypto`.
 - If the evidence really points to malware staging, beacon config extraction, or packed samples, switch to `/ctf-malware`.

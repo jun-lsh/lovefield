@@ -1,33 +1,39 @@
 ---
 name: ctf-ai-ml
 description: Provides AI and machine learning techniques for CTF challenges. Use when attacking ML models, crafting adversarial examples, performing model extraction, prompt injection, membership inference, training data poisoning, fine-tuning manipulation, neural network analysis, LoRA adapter exploitation, LLM jailbreaking, or solving AI-related puzzles.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF AI/ML
 
 Quick reference for AI/ML CTF challenges. Each technique has a one-liner here; see supporting files for full details.
 
-## Prerequisites
+## Environment
 
-**Python packages (all platforms):**
-```bash
-pip install torch transformers numpy scipy Pillow safetensors scikit-learn
+Use **`ai-python`**, not system `python3`, for ML/torch work. The AI stack lives
+in an isolated venv at `/opt/ai-venv` so its numpy/scipy cannot clash with Sage.
+
+**Linux Packages**
+```
+libgomp1
 ```
 
-**Linux (apt):**
-```bash
-apt install python3-dev
+**Python Libraries**
+```
+torch
+torchvision
+transformers
+scikit-learn
+scipy
+pandas
+safetensors
 ```
 
-**macOS (Homebrew):**
-```bash
-brew install python@3
+**Installed Tool Repos / Binaries**
 ```
+ai-python - wrapper for /opt/ai-venv/bin/python
+```
+
+Torch uses the GPU build by default and falls back to CPU when no GPU is exposed.
 
 ## Additional Resources
 
@@ -37,7 +43,7 @@ brew install python@3
 
 ---
 
-## When to Pivot
+## When to Switch Lanes
 
 - If the challenge becomes pure math, lattice reduction, or number theory with no ML component, switch to `/ctf-crypto`.
 - If the task is reverse engineering a compiled ML model binary (ONNX loader, TensorRT engine, custom inference binary), switch to `/ctf-reverse`.

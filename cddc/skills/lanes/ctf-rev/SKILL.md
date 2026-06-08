@@ -1,43 +1,59 @@
 ---
 name: ctf-reverse
 description: Provides reverse engineering techniques for CTF challenges. Use when the main job is to understand how a compiled, obfuscated, packed, or virtualized target works before exploiting or solving it, including binaries, APKs, WASM, firmware, custom VMs, bytecode, game clients, malware-like loaders, and anti-debug or anti-analysis logic. Do not use it when the vulnerability is already understood and the remaining task is exploitation; use pwn instead. Do not use it for pure web workflows, log or disk forensics, or standalone crypto problems unless reversing the implementation is the real blocker.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF Reverse Engineering
 
 Quick reference for RE challenges. For detailed techniques, see supporting files.
 
-## Prerequisites
+## Environment
 
-**Python packages (all platforms):**
-```bash
-pip install frida-tools angr qiling uncompyle6 capstone lief z3-solver
-# For Python 3.9+ bytecode: build pycdc from source
-git clone https://github.com/zrax/pycdc && cd pycdc && cmake . && make
+**Linux Packages**
+```
+openjdk-21
+dotnet-sdk-8.0
+apktool
+upx
+cmake
+gcc-aarch64-linux-gnu
+gcc-arm-linux-gnueabihf
+binutils
+gdb
+radare2
+strace
+ltrace
 ```
 
-**Linux (apt):**
-```bash
-apt install gdb radare2 binutils strace ltrace apktool upx
+**Python Libraries**
+```
+lief
+pefile
+pyelftools
+frida-tools
+qiling
+uncompyle6
+flare-floss
+angr
+capstone
+unicorn
+keystone-engine
+z3-solver
 ```
 
-**macOS (Homebrew):**
-```bash
-brew install gdb radare2 binutils apktool upx ghidra
+**Installed Tool Repos / Binaries**
+```
+Ghidra 12.1 headless - /opt/ghidra, command: ghidra-headless
+ghidra-rpc - JSON decompile interface, command: ghidra-rpc
+GolangAnalyzer - installed Ghidra extension
+jadx - Android decompiler
+ilspycmd - .NET decompiler
+pycdc / pycdas - Python bytecode decompilers
+oxidizer - Rust decompiler repo at /opt/oxidizer
 ```
 
-**radare2 plugins:**
-```bash
-r2pm -ci r2ghidra   # Native Ghidra decompiler for radare2
-```
-
-**Manual install:**
-- pwndbg — Linux: [GitHub](https://github.com/pwndbg/pwndbg), macOS: `brew install pwndbg/tap/pwndbg-gdb`
+Use `ghidra-rpc start --detach`, `load <bin>`, and `decompile <prog> <func>`
+when you need structured decompiler output from the agent.
 
 ## Additional Resources
 
@@ -62,7 +78,7 @@ r2pm -ci r2ghidra   # Native Ghidra decompiler for radare2
 
 ---
 
-## When to Pivot
+## When to Switch Lanes
 
 - If you already understand the binary and now need heap, ROP, or kernel exploitation, switch to `/ctf-pwn`.
 - If the challenge is really about recovering deleted files, PCAP data, or disk artifacts, switch to `/ctf-forensics`.

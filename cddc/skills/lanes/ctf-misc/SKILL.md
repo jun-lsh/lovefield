@@ -1,11 +1,6 @@
 ---
 name: ctf-misc
 description: Provides miscellaneous CTF challenge techniques for problems that do not cleanly fit the main categories. Use for encoding puzzles, pyjails, bash jails, RF/SDR, DNS oddities, unicode tricks, esoteric languages, QR or audio puzzles, constraint solving, game theory, unusual sandbox escapes, and hybrid logic puzzles. Prefer a more specific skill first when the challenge is mainly web, pwn, reverse, forensics, malware, OSINT, or crypto. Treat this as the fallback skill for genuine cross-category or edge-case challenges, not the default starting point.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access for tool installation.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch Skill
-metadata:
-  user-invocable: "false"
 ---
 
 # CTF Miscellaneous
@@ -49,7 +44,7 @@ brew install ffmpeg qrencode
 
 ---
 
-## When to Pivot
+## When to Switch Lanes
 
 - If the puzzle is actually centered on cryptography or number theory, switch to `/ctf-crypto`.
 - If the challenge is a real binary exploit instead of a jail, toy VM, or encoding problem, switch to `/ctf-pwn` or `/ctf-reverse`.

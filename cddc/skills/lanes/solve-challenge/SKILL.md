@@ -1,12 +1,6 @@
 ---
 name: solve-challenge
 description: Solves CTF challenges by performing first-pass triage, identifying the dominant category, and routing execution to the right specialized ctf-* skill. Use when the user gives you a challenge bundle, a remote service, a suspicious file, or only a vague challenge description and you must determine where to start. Do not use it when the category is already clear and a specialized skill can be invoked directly; this is the dispatcher and recon entrypoint, not the deepest reference for category-specific techniques.
-license: MIT
-compatibility: Requires filesystem-based agent (Claude Code or similar) with bash, Python 3, and internet access. Orchestrates other ctf-* skills.
-allowed-tools: Bash Read Write Edit Glob Grep Task WebFetch WebSearch Skill
-metadata:
-  user-invocable: "true"
-  argument-hint: "[category] [challenge-file-or-url]"
 ---
 
 # CTF Challenge Solver

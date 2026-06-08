@@ -13,34 +13,26 @@ this when the toolchain changes; do not bake it into the role/lane prompts.
   a CVE, version, error string, attack name, or writeup. `fetch_url` is for the
   challenge's OWN target/host only.
 
-What's installed, by area (cat the manifest for the full list):
+# Installed Packages
 
-- **recon (everywhere):** gcc/g++/make, binutils (objdump/nm/readelf/strings),
-  gdb, radare2, checksec, patchelf, file/xxd.
-- **web:** requests/httpx, beautifulsoup4/lxml, pyjwt + `jwt_tool`, flask (host an
-  OOB/SSRF/XSS callback listener), websocket-client, name-that-hash, node/npm. No
-  scanners/brute - jeopardy web is crafting one precise request.
-- **crypto:** SageMath IS available - use it (lattices, poly GCD over Z_n[x], ECC).
-  Also pycryptodome, sympy, z3, gmpy2, fpylll, pari-gp, RsaCtfTool, hashcat, john.
+Distro: Ubuntu 22.04
+
+```
+gcc/g++/make
+binutils (objdump/nm/readelf/strings)
+gdb
+radare2
+checksec
+patchelf
+file/xxd
+python3
+```
+
+Lane-specific packages and libraries are listed under their respective
+`cddc/skills/lanes/*/SKILL.md` files.
+
 - **stego / media:** steghide, stegseek (passphrase cracker), zsteg, binwalk,
   foremost, exiftool, zbarimg, tesseract, imagemagick, ffmpeg, sox, stegolsb.
-- **pwn:** pwntools, gef (bata24 fork, auto-loaded in gdb), pwninit,
-  glibc-all-in-one + libc-database (in /opt), one_gadget, seccomp-tools, ROPgadget,
-  ropper, angr/angrop, gdb-multiarch + qemu (cross-arch / kernel). For the EXACT
-  remote libc/ld, `docker compose up` the challenge's own container (see Docker).
-- **rev:** Ghidra headless + **`ghidra-rpc`** (decompile over JSON - `ghidra-rpc
-  start --detach`, `load <bin>`, `decompile <prog> <func>`; Go analyzer included),
-  jadx (Android), ilspycmd (.NET), pycdc (python bytecode), frida, qiling, lief,
-  pefile. Rust: `oxidizer` runs as a sidecar container (build + run /opt/oxidizer
-  via the docker socket).
-- **forens:** tshark (pcap), volatility3 (memory dumps), sleuthkit (disk images).
-  Eric Zimmerman `MFTECmd`/`EvtxECmd`/`RECmd` are baked; pull MORE net9 EZ tools on
-  demand (the how-to is in `/opt/cddc-forens.txt`). Light stego/media tools
-  (steghide, zsteg, binwalk, exiftool, zbarimg...) are in the stego set above.
-- **ai:** an ISOLATED venv - run ML/torch with **`ai-python`** (NOT system
-  `python3`): torch + torchvision (GPU when the host exposes one, else CPU),
-  transformers, scikit-learn, scipy, pandas. (Isolated so its numpy can't clash
-  with Sage's in the system python.)
 
 - **Docker** (only if `docker` works - the host socket is bound for specialist /
   deep roles, not triage): `docker compose up` / `docker run` a service challenge
