@@ -66,14 +66,14 @@ python3 -c "from Crypto.Util.number import *; n=<N>; print(f'bits={n.bit_length(
 python3 -c "from sympy import factorint; print(factorint(<n>))"  # Small factors?
 openssl rsa -pubin -in key.pub -text -noout  # Extract n, e from PEM
 
-# Quick factorization tools
-python3 RsaCtfTool.py -n <n> -e <e> --uncipher <c>
+# Quick factorization tools (RsaCtfTool is at /opt - run by full path)
+python3 /opt/RsaCtfTool/RsaCtfTool.py -n <n> -e <e> --uncipher <c>
 
 # XOR analysis
 python3 -c "from pwn import xor; print(xor(bytes.fromhex('<hex>'), b'flag{'))"
 
-# Hash identification
-hashid '<hash>'
+# Hash identification (name-that-hash = `nth`; or hashcat's identifier)
+nth -t '<hash>'
 hashcat --identify '<hash>'
 
 # SageMath (for lattice/ECC)

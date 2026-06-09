@@ -49,10 +49,22 @@ class Dispatcher:
 
         workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
         sock = docker_sock if docker_sock is not None else config.DOCKER_SOCK
-        creds = credential_mounts(config.HARNESS_USER) if config.HARNESS_SHARE_CREDS else []
+        mounts = credential_mounts(config.HARNESS_USER) if config.HARNESS_SHARE_CREDS else []
+        # Mount the skills library read-only so the cc agents (which DON'T get the
+        # load_system() prompt) can read their lane playbook + technique docs at
+        # /opt/cddc-skills (see CCWorker._claude_md). Harmless for the other kinds.
+        skills_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skills")
+        if os.path.isdir(skills_dir):
+            mounts = [*mounts, f"{skills_dir}:/opt/cddc-skills:ro"]
+        # Mirror the workdir at the decompiler's view (/files/<thread>) so the path the
+        # agent SEES is the exact path it must pass to the decompiler MCP's import_binary
+        # (the MCP is a separate container reading the shared CDDC_FILES_DIR at /files).
+        # Without this the agent guesses /tmp/.. or /challenge/.. which the MCP can't see.
+        if config.CDDC_SANDBOX_NETWORK and config.CDDC_DECOMPILER_URL:
+            mounts = [*mounts, f"{workdir}:/files/{chall.thread_id}:ro"]
         return Sandbox(
             config.sandbox_image_for_lane(lane.name), chall.thread_id, workdir,
-            extra_mounts=creds, docker_sock=(sock or None),
+            extra_mounts=mounts, docker_sock=(sock or None),
             mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
             gpu=config.CDDC_SANDBOX_GPU,
             network=config.CDDC_SANDBOX_NETWORK,

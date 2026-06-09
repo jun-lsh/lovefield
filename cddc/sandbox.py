@@ -59,7 +59,7 @@ class Sandbox:
         # Expose the host GPU (docker --gpus all) - for the ai lane's CUDA torch.
         self.gpu = gpu
         # Docker network to join (so the agent can reach the shared decompiler
-        # service by name) + the decompiler MCP URL passed in for the `dc` client.
+        # service by name) + the decompiler MCP URL passed in for the agent's MCP client.
         self.network = (network or "").strip()
         self.decompiler_url = (decompiler_url or "").strip()
         # Extra `-v` specs appended to `docker run` (e.g. host credential files
@@ -135,9 +135,9 @@ class Sandbox:
         mount_args: list[str] = ["-v", workdir_spec]
         for spec in self.extra_mounts:
             mount_args += ["-v", spec]
-        # CDDC_THREAD is always exported: the `dc` decompiler client needs it to map
-        # a workdir-relative path to the service's /files/<thread> view, and manual
-        # `docker run`s use it for the cddc.thread label.
+        # CDDC_THREAD is always exported: the docker shim labels sibling containers
+        # cddc.thread=$CDDC_THREAD (per-challenge reaping), and in-box tooling maps the
+        # challenge files to the decompiler's /files/<thread> view.
         env_args: list[str] = ["-e", f"CDDC_THREAD={self.thread_id}"]
         if self.decompiler_url:
             env_args += ["-e", f"CDDC_DECOMPILER_URL={self.decompiler_url}"]

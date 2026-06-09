@@ -24,13 +24,13 @@
 ## Memory Forensics (Volatility 3)
 
 ```bash
-vol3 -f memory.dmp windows.info
-vol3 -f memory.dmp windows.pslist
-vol3 -f memory.dmp windows.cmdline
-vol3 -f memory.dmp windows.netscan
-vol3 -f memory.dmp windows.filescan
-vol3 -f memory.dmp windows.dumpfiles --physaddr <addr>
-vol3 -f memory.dmp windows.mftscan | grep flag
+vol -f memory.dmp windows.info
+vol -f memory.dmp windows.pslist
+vol -f memory.dmp windows.cmdline
+vol -f memory.dmp windows.netscan
+vol -f memory.dmp windows.filescan
+vol -f memory.dmp windows.dumpfiles --physaddr <addr>
+vol -f memory.dmp windows.mftscan | grep flag
 ```
 
 **Common plugins:**
@@ -39,7 +39,7 @@ vol3 -f memory.dmp windows.mftscan | grep flag
 - `windows.netscan` - Network connections
 - `windows.filescan` - File objects in memory
 - `windows.dumpfiles` - Extract files by physical address
-- `windows.mftscan` - MFT FILE objects in memory (timestamps, filenames). Note: `mftparser` was Volatility 2 only; Vol3 uses `mftscan`
+- `windows.mftscan` - MFT FILE objects in memory (timestamps, filenames). Note: `mftparser` was Volatility 2 only; vol uses `mftscan`
 
 ---
 
@@ -100,7 +100,7 @@ vmss2core -W path/to/snapshot.vmss path/to/snapshot.vmem
 - Even if original files deleted, MFT preserves modification timestamps
 - Seed-based encryption: recover mtime → derive key
 ```bash
-vol3 -f memory.dmp windows.mftscan | grep flag
+vol -f memory.dmp windows.mftscan | grep flag
 # mtime as Unix epoch → seed for PRNG → derive encryption key
 ```
 
@@ -430,7 +430,7 @@ veracrypt -t --truecrypt -p "password" volume.tc /mnt/vc
 **Pattern:** Standard `dumpfiles` or `filescan` + `dumpfiles --physaddr` fails on a deleted file because its directory entry has been marked free. The MFT record that still holds the file's `$DATA` attribute survives until the record is reused. Volatility 2's `mftparser` can dump the resident `$DATA` directly when given the exact `--offset` of the MFT record found via `filescan`.
 
 ```bash
-# 1. Locate the MFT record offset (Volatility 2 example; Vol3 uses windows.mftscan)
+# 1. Locate the MFT record offset (Volatility 2 example; vol uses windows.mftscan)
 vol.py -f Challenge.raw --profile=Win7SP1x86 mftparser \
     | grep -A2 "target_filename"
 

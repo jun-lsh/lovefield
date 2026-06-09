@@ -126,7 +126,7 @@ class CCWorker(Worker):
                     "type": "http",
                     "url": self.decompiler_url,
                     # FastMCP rejects a container-name Host (DNS-rebind protection),
-                    # so present an allowed one - same fix the `dc` client uses.
+                    # so present an allowed one (the Host-header workaround).
                     "headers": {"Host": f"localhost:{port}"},
                 }}}
                 with open(os.path.join(self.workdir, ".mcp.json"), "w", encoding="utf-8") as f:
@@ -137,9 +137,15 @@ class CCWorker(Worker):
             pass
 
     def _claude_md(self) -> str:
+        thread = self.chall.thread_id
         mcp_line = (
-            "- For reverse engineering, a `decompiler` MCP server (headless Ghidra + "
-            "GolangAnalyzer) is configured - list/decompile functions through it.\n"
+            f"- DECOMPILER (`decompiler` MCP, headless Ghidra + GolangAnalyzer): a SHARED "
+            f"service in a SEPARATE container - it does NOT see your box's local files. It "
+            f"reads the shared challenge mount, where your `/challenge/<file>` appears as "
+            f"`/files/{thread}/<file>` (that path is ALSO visible in your box - "
+            f"`ls /files/{thread}`). Call `import_binary` with `/files/{thread}/<file>` - "
+            f"NEVER /challenge/... or /tmp/.... Then list/decompile functions through the "
+            f"MCP by name (GolangAnalyzer gives `main.*` names for Go).\n"
             if self.decompiler_url else ""
         )
         tier = (
@@ -155,7 +161,10 @@ class CCWorker(Worker):
             f"{tier}This box has the full toolchain (compilers, debuggers, "
             "pwntools/angr, sage, decompilers, forensics, etc.).\n\n"
             "## Work fast, don't flail\n"
-            "- START with `ls -la` and read the ACTUAL files. Never guess filenames.\n"
+            f"- READ YOUR LANE PLAYBOOK FIRST: `/opt/cddc-skills/lanes/ctf-{self.lane.name}/"
+            "SKILL.md` (+ the technique docs in that folder) and `/opt/cddc-skills/"
+            "common.md` - curated, competition-tested approaches for this lane. Use them.\n"
+            "- Then `ls -la` and read the ACTUAL challenge files. Never guess filenames.\n"
             "- This is JEOPARDY CTF: craft ONE precise approach from the files + "
             "description. Do NOT scan ports, sweep the network, brute-force, or fuzz - "
             "there is nothing to discover that way.\n"
@@ -166,6 +175,16 @@ class CCWorker(Worker):
             "turn. Do NOT rabbit-hole or invent busywork - the operator is watching and "
             "will steer you. Asking beats flailing.\n\n"
             "## Tools & flag\n"
+            "- This box has a DEEP toolchain (crypto: `sage`, sympy, pycryptodome, "
+            "z3, fpylll, openssl, /opt/RsaCtfTool/RsaCtfTool.py; pwn: pwntools, angr, "
+            "gdb+gef, pwninit; rev: the decompiler MCP, jadx, ilspycmd; etc.). Before "
+            "you decide a tool is missing, run `command -v <tool>` and check the exact "
+            "installed set in the per-area manifests: `cat /opt/cddc-*.txt` "
+            "(recon/crypto/web/stego/pwn/rev/forens). Don't claim it can't be done here "
+            "without checking.\n"
+            "- SEARCH THE WEB (WebSearch / WebFetch) for CVEs, library/CTF-tool versions, "
+            "error strings, attack names, and writeups - a quick search beats guessing or "
+            "rabbit-holing. (If a web tool ever errors as unsupported, say so and proceed.)\n"
             "- DECLARE the flag by writing ONLY the verified flag to `.cddc_solution` "
             "(`printf '%s' 'CDDC{...}' > .cddc_solution`). Never write a test / example "
             "/ placeholder flag there.\n"

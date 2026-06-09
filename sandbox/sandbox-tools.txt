@@ -92,7 +92,8 @@ pwn
 rev
   Present now:
     Ghidra 12.1 headless (ghidra-headless) + GolangAnalyzer 1.3.0 extension
-    ghidra-rpc - Ghidra-as-a-JSON-daemon, the agent's decompile interface
+    decompiler MCP - the shared always-warm pyghidra-mcp service (reached over MCP by
+      the Claude harness); ghidra-headless for a manual run. (no ghidra-rpc, no dc)
     pip: lief, pefile, pyelftools, frida-tools, qiling, uncompyle6, flare-floss
     pycdc/pycdas (py3.9+ bytecode), jadx (Android), ilspycmd (.NET, via dotnet-sdk-8.0)
     apt: openjdk-21, apktool, upx, cmake, gcc cross (aarch64/arm)

@@ -266,8 +266,8 @@ TRIAGE_SOCKET = _envs("CDDC_TRIAGE_SOCKET", "0").lower() in ("1", "true", "yes")
 CDDC_SANDBOX_GPU = _envs("CDDC_SANDBOX_GPU", "0").lower() in ("1", "true", "yes")
 # Shared decompiler service (pyghidra-mcp). Agents reach it over a docker network:
 # set CDDC_SANDBOX_NETWORK to the network the `cddc-decompiler` container is on, and
-# the sandbox joins it + gets CDDC_DECOMPILER_URL so the `dc` client can find it.
-# Empty network -> no decompiler wiring (dc will just fail to connect).
+# the sandbox joins it + gets CDDC_DECOMPILER_URL so the agent's decompiler MCP finds it.
+# Empty network -> no decompiler wiring (the MCP just won't connect).
 CDDC_SANDBOX_NETWORK = _envs("CDDC_SANDBOX_NETWORK", "")
 CDDC_DECOMPILER_URL = _envs("CDDC_DECOMPILER_URL", "http://cddc-decompiler:8000/mcp")
 

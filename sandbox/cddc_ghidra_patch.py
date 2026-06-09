@@ -9,7 +9,7 @@ as a *label at the entry point* that is NOT the function's primary symbol, so a
 by-name lookup misses while by-address works (the address branch short-circuits
 first).  On a Go binary the agent SEES `main.transformSeed` in the function
 listing yet `decompile main.transformSeed` returns "not found": pure friction
-over a tool we fully control, hit identically by `dc` and the Claude harness.
+over a tool we fully control, hit by the Claude harness over MCP.
 
 What it does
 ------------

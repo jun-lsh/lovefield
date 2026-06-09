@@ -11,9 +11,9 @@ this when the toolchain changes; do not bake it into the role/lane prompts.
   returns nothing (AND it's absent from the manifest) is it really not here.
 - **Your toolset is listed in `/opt/cddc-*.txt`** - `cat /opt/cddc-rev.txt` (or
   pwn / crypto / stego / web / forens / recon) for exact names before deciding
-  something can't be done here. NAMING TRAPS: the decompiler is **`ghidra-rpc`**
-  (a JSON daemon) or `ghidra-headless` - there is **no bare `ghidra`** command, so
-  `command -v ghidra` failing does NOT mean "no decompiler". The disassembler is
+  something can't be done here. NAMING TRAPS: the decompiler is the shared
+  **`decompiler`** MCP service (or `ghidra-headless` for a manual run) - there is no
+  bare `ghidra` command, and `ghidra-rpc` / `dc` no longer exist. The disassembler is
   **`r2`** / `radare2`. Check the real name before you write it off.
 - `web_search` / `read_url` are available (Serper or DuckDuckGo, + Jina) - look up
   a CVE, version, error string, attack name, or writeup. `fetch_url` is for the
@@ -43,20 +43,14 @@ Lane-specific packages and libraries are listed under their respective
   glibc-all-in-one + libc-database (in /opt), one_gadget, seccomp-tools, ROPgadget,
   ropper, angr/angrop, gdb-multiarch + qemu (cross-arch / kernel). For the EXACT
   remote libc/ld, `docker compose up` the challenge's own container (see Docker).
-- **rev:** **`dc`** = the shared Ghidra decompiler (one always-warm server, with
-  GolangAnalyzer for Go binaries). Workflow: `dc import <bin>` (analyses ONCE,
-  cached for the whole challenge - so do it early), then `dc functions [query]`,
-  `dc decompile <fn>` (pseudo-C; `--callees`/`--strings`/`--xrefs`), `dc xrefs <fn>`,
-  `dc strings <q>`, `dc imports`/`dc exports`, `dc search <q>` (semantic); `dc
-  binaries` shows load/analysis status; `dc --help` for all. To decompile, FIRST
-  `dc functions` and read the EXACT name off the list, then `dc decompile <that
-  name>` - don't guess (Go funcs are `main.main`, not `main`; one binary is loaded
-  so you don't name it). (No per-box Ghidra to
-  start - it's a network service.) Decompile ONLY via `dc` - **do NOT use
-  `ghidra-rpc`** (deprecated, being removed; ignore it if a manifest still lists it).
-  Also: jadx (Android), ilspycmd (.NET), pycdc
-  (python bytecode), frida, qiling, lief, pefile. Rust: `oxidizer` runs as a sidecar
-  container via the docker socket.
+- **rev:** decompile via the shared **`decompiler`** MCP service (one always-warm
+  headless-Ghidra server with GolangAnalyzer for Go). The Claude harness has it wired:
+  `import_binary` the binary's `/files/<...>` path (analyses ONCE, cached for the whole
+  challenge), then list/decompile functions BY NAME (read the exact name first - Go funcs
+  are `main.main`, not `main`). For a manual decompile in-box, `ghidra-headless` runs
+  Ghidra directly. (`ghidra-rpc` and the old `dc` client are gone.) Also: jadx (Android),
+  ilspycmd (.NET), pycdc (python bytecode), frida, qiling, lief, pefile. Rust: `oxidizer`
+  runs as a sidecar container via the docker socket.
 - **forens:** tshark (pcap), volatility3 (memory dumps), sleuthkit (disk images).
   Eric Zimmerman `MFTECmd`/`EvtxECmd`/`RECmd` are baked; pull MORE net9 EZ tools on
   demand (the how-to is in `/opt/cddc-forens.txt`). Light stego/media tools

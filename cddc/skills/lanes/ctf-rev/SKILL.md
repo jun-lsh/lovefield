@@ -43,17 +43,19 @@ z3-solver
 
 **Installed Tool Repos / Binaries**
 ```
-Ghidra 12.1 headless - /opt/ghidra, command: ghidra-headless
-ghidra-rpc - JSON decompile interface, command: ghidra-rpc
-GolangAnalyzer - installed Ghidra extension
+decompiler MCP - the shared always-warm Ghidra service (+ GolangAnalyzer); USE THIS
+Ghidra 12.1 headless - /opt/ghidra, command: ghidra-headless (manual-decompile fallback)
+GolangAnalyzer - Ghidra extension (Go binaries -> main.* function names)
 jadx - Android decompiler
 ilspycmd - .NET decompiler
 pycdc / pycdas - Python bytecode decompilers
-oxidizer - Rust decompiler repo at /opt/oxidizer
+oxidizer - Rust decompiler repo at /opt/oxidizer (docker sidecar)
 ```
 
-Use `ghidra-rpc start --detach`, `load <bin>`, and `decompile <prog> <func>`
-when you need structured decompiler output from the agent.
+Decompile via the **`decompiler`** MCP (the Claude harness has it wired): `import_binary`
+the binary's `/files/<...>` path (analyses once), then list functions and decompile BY
+NAME - read the exact name first (Go funcs are `main.main`, not `main`). `ghidra-headless`
+is the in-box manual fallback. (`ghidra-rpc` and the old `dc` client are gone.)
 
 ## Additional Resources
 

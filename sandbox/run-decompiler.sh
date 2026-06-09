@@ -2,9 +2,9 @@
 # Bring up the shared pyghidra-mcp decompiler service for the fleet.
 #
 # Run from the repo root, in the SAME environment as the bot, so the /files mount
-# matches the dir the bot writes challenge binaries to (CDDC_FILES_DIR). The agents'
-# `dc` client reaches this service over the docker network and reads binaries from
-# /files/<thread> (= each challenge's workdir).
+# matches the dir the bot writes challenge binaries to (CDDC_FILES_DIR). Agents reach
+# this service over MCP across the docker network (the Claude harness's `decompiler`
+# MCP); it reads binaries from /files/<thread> (= each challenge's workdir).
 #
 # Prereq - build the decompiler image:
 #   docker build -f sandbox/Dockerfile.sandbox --target decompiler -t ctf-sandbox:decompiler sandbox
@@ -12,7 +12,7 @@ set -eu
 
 # Read CDDC_FILES_DIR / CDDC_SANDBOX_NETWORK from the bot's own cddc/.env (unless set
 # in the shell) so /files mounts the SAME dir the bot writes challenge binaries to.
-# A mismatch here = `dc import` "cannot be found" (the service can't see the binary).
+# A mismatch here = import "cannot be found" (the service can't see the binary).
 ENV_FILE="${CDDC_ENV_FILE:-cddc/.env}"
 _envget() { [ -f "$ENV_FILE" ] && grep -E "^$1=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed 's/[[:space:]]*#.*//; s/[[:space:]]*$//'; }
 NET="${CDDC_SANDBOX_NETWORK:-$(_envget CDDC_SANDBOX_NETWORK)}"; NET="${NET:-cddc-net}"
@@ -34,4 +34,4 @@ docker run -d --name cddc-decompiler --network "$NET" \
 
 echo "cddc-decompiler up on '$NET' (MCP :8000, files <- $FILES_ABS)"
 echo "Set in cddc/.env:  CDDC_SANDBOX_NETWORK=$NET"
-echo "Logs:  docker logs -f cddc-decompiler   |   Health:  docker exec <any-sandbox> dc binaries"
+echo "Logs:  docker logs -f cddc-decompiler   |   it serves MCP on :8000 (/mcp)"
