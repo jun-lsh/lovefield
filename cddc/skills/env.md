@@ -3,12 +3,18 @@
 SWAPPABLE SNIPPET - facts about the box you are on RIGHT NOW, not doctrine. Update
 this when the toolchain changes; do not bake it into the role/lane prompts.
 
-- Your `run_shell` runs inside the **ctf-sandbox Linux container** - a real CTF
-  toolchain, not a bare host. Don't assume you lack a tool: check first. (If the
-  tools below are "command not found", you're in a reduced/local shell - say so.)
-- **Your installed toolset is listed in `/opt/cddc-*.txt`.** `cat /opt/cddc-pwn.txt`
-  (or crypto / rev / stego / recon) to see exactly what you have for your lane
-  before deciding something can't be done here.
+- Your `run_shell` runs inside the **ctf-sandbox Linux container** - a FULL CTF
+  toolchain (r2, Ghidra, pwntools, sage, volatility3, ...), NOT a bare host.
+  **NEVER state a tool is missing without running `command -v <tool>` first.**
+  Assuming "probably no decompiler here" and escalating on that basis is a triage
+  ERROR - the tool is almost certainly installed. Only if `command -v` actually
+  returns nothing (AND it's absent from the manifest) is it really not here.
+- **Your toolset is listed in `/opt/cddc-*.txt`** - `cat /opt/cddc-rev.txt` (or
+  pwn / crypto / stego / web / forens / recon) for exact names before deciding
+  something can't be done here. NAMING TRAPS: the decompiler is **`ghidra-rpc`**
+  (a JSON daemon) or `ghidra-headless` - there is **no bare `ghidra`** command, so
+  `command -v ghidra` failing does NOT mean "no decompiler". The disassembler is
+  **`r2`** / `radare2`. Check the real name before you write it off.
 - `web_search` / `read_url` are available (Serper or DuckDuckGo, + Jina) - look up
   a CVE, version, error string, attack name, or writeup. `fetch_url` is for the
   challenge's OWN target/host only.
@@ -33,10 +39,44 @@ Lane-specific packages and libraries are listed under their respective
 
 - **stego / media:** steghide, stegseek (passphrase cracker), zsteg, binwalk,
   foremost, exiftool, zbarimg, tesseract, imagemagick, ffmpeg, sox, stegolsb.
+- **pwn:** pwntools, gef (bata24 fork, auto-loaded in gdb), pwninit,
+  glibc-all-in-one + libc-database (in /opt), one_gadget, seccomp-tools, ROPgadget,
+  ropper, angr/angrop, gdb-multiarch + qemu (cross-arch / kernel). For the EXACT
+  remote libc/ld, `docker compose up` the challenge's own container (see Docker).
+- **rev:** **`dc`** = the shared Ghidra decompiler (one always-warm server, with
+  GolangAnalyzer for Go binaries). Workflow: `dc import <bin>` (analyses ONCE,
+  cached for the whole challenge - so do it early), then `dc functions [query]`,
+  `dc decompile <fn>` (pseudo-C; `--callees`/`--strings`/`--xrefs`), `dc xrefs <fn>`,
+  `dc strings <q>`, `dc imports`/`dc exports`, `dc search <q>` (semantic); `dc
+  binaries` shows load/analysis status; `dc --help` for all. To decompile, FIRST
+  `dc functions` and read the EXACT name off the list, then `dc decompile <that
+  name>` - don't guess (Go funcs are `main.main`, not `main`; one binary is loaded
+  so you don't name it). (No per-box Ghidra to
+  start - it's a network service.) Decompile ONLY via `dc` - **do NOT use
+  `ghidra-rpc`** (deprecated, being removed; ignore it if a manifest still lists it).
+  Also: jadx (Android), ilspycmd (.NET), pycdc
+  (python bytecode), frida, qiling, lief, pefile. Rust: `oxidizer` runs as a sidecar
+  container via the docker socket.
+- **forens:** tshark (pcap), volatility3 (memory dumps), sleuthkit (disk images).
+  Eric Zimmerman `MFTECmd`/`EvtxECmd`/`RECmd` are baked; pull MORE net9 EZ tools on
+  demand (the how-to is in `/opt/cddc-forens.txt`). Light stego/media tools
+  (steghide, zsteg, binwalk, exiftool, zbarimg...) are in the stego set above.
+- **ai:** an ISOLATED venv - run ML/torch with **`ai-python`** (NOT system
+  `python3`): torch + torchvision (GPU when the host exposes one, else CPU),
+  transformers, scikit-learn, scipy, pandas. (Isolated so its numpy can't clash
+  with Sage's in the system python.)
 
-- **Docker** (only if `docker` works - the host socket is bound for specialist /
-  deep roles, not triage): `docker compose up` / `docker run` a service challenge
-  against the host daemon. Containers you start are auto-labeled
-  `cddc.thread=$CDDC_THREAD` and reaped per-challenge - no cleanup needed. If you
-  create one another way (python docker SDK, raw API, podman), label it
-  `cddc.thread=$CDDC_THREAD` yourself or it leaks.
+- **Docker = the challenge's REAL environment. USE IT.** If the challenge ships a
+  `Dockerfile` or `docker-compose.yml`, that is exactly how it is meant to run -
+  BUILD AND RUN IT, do NOT approximate it on the bare box. (pwn: the container pins
+  the exact libc/ld your exploit must match; web: it IS the live target.) The host
+  docker socket is bound in, so:
+  - **service** -> run it **DETACHED** so the call returns at once, then connect:
+    `docker compose up -d`  or  `docker build -t chal . && docker run -d -p 1337:1337 chal`.
+  - the **build is slow** and will blow the 30s default - pass a generous
+    **`timeout_sec`** (e.g. 300) to run_shell for the build, or build detached + poll.
+  - containers you start are auto-labeled `cddc.thread=$CDDC_THREAD` and reaped per
+    challenge - no cleanup needed; if you make one another way (python docker SDK,
+    raw API) label it `cddc.thread=$CDDC_THREAD` yourself or it leaks.
+  If `docker` is "permission denied" / "not found", your box wasn't given the socket
+  - say so rather than silently faking the environment locally.

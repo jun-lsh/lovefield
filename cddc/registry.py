@@ -13,13 +13,41 @@ no retrofit.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from .worker import Worker
+
+if TYPE_CHECKING:
+    from .sandbox import Sandbox
 
 
 class Registry:
     def __init__(self) -> None:
         self.active: dict[int, list[Worker]] = {}
+        # The ONE shared sandbox box per challenge (task #12). It outlives the
+        # individual workers: created on first use, reused by every worker on the
+        # thread (escalation / race / lane reroute), released only at challenge end.
+        self.boxes: dict[int, "Sandbox"] = {}
+
+    def get_box(self, thread_id: int, factory: Callable[[], "Sandbox"]) -> "Sandbox":
+        """Return the challenge's shared box, creating it (via `factory`) on first
+        use. Every worker on the thread gets the SAME object, so a handoff reuses
+        the live container instead of recreating it. Synchronous and free of any
+        await between the check and the store, so concurrent dispatch (a race
+        fan-out) can't make two boxes. The container itself is launched lazily by
+        the worker's start() (idempotent), not here."""
+        box = self.boxes.get(thread_id)
+        if box is None:
+            box = factory()
+            self.boxes[thread_id] = box
+        return box
+
+    async def release_box(self, thread_id: int) -> None:
+        """Destroy and forget the challenge's box (challenge end: !kill / !solved).
+        Best-effort; a no-op if there was never a box for the thread."""
+        box = self.boxes.pop(thread_id, None)
+        if box is not None:
+            await box.release()
 
     def add(self, thread_id: int, worker: Worker) -> None:
         self.active.setdefault(thread_id, []).append(worker)

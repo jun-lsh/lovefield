@@ -11,12 +11,47 @@ Nothing here imports `discord` - it only ever touches a `Channel`.
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 
 from .challenge import Challenge
 from .channel import Channel
 from .lanes.base import Lane
+
+# Handoff dossier: a worker that stands down writes what it learned here, on the
+# challenge workdir. Because the box now PERSISTS and a fresh brain takes it over
+# (#12), the dossier lives on the bind-mounted workdir so the next worker reads it
+# at /challenge/.cddc/dossier.md - takeover continues the work instead of restarting
+# it. See dossier_text() (what a worker contributes) + append/read_dossier (io).
+DOSSIER_REL = os.path.join(".cddc", "dossier.md")
+# In-container path (the workdir is bind-mounted at the sandbox mount, /challenge).
+DOSSIER_CONTAINER_PATH = "/challenge/.cddc/dossier.md"
+
+
+def append_dossier(workdir: str, section: str) -> str:
+    """Append a handoff `section` to <workdir>/.cddc/dossier.md (created if needed).
+
+    Appends (never overwrites) so the dossier ACCUMULATES across a triage -> pro ->
+    deep ladder - the deepest brain sees the whole history. Returns the in-container
+    path to point an agent at. Best-effort: an IO error must never block a handoff."""
+    try:
+        path = os.path.join(workdir, DOSSIER_REL)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(section.rstrip() + "\n\n")
+    except OSError:
+        pass
+    return DOSSIER_CONTAINER_PATH
+
+
+def read_dossier(workdir: str) -> str:
+    """The accumulated handoff dossier on this challenge's workdir, or "" if none."""
+    try:
+        with open(os.path.join(workdir, DOSSIER_REL), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
 
 
 # --- flag hygiene (shared by EVERY worker) ---------------------------------
@@ -235,6 +270,35 @@ class Worker:
             "STEERS:",
             *([f"  {st}" for st in self.chall.steers] or ["  (none)"]),
         ]
+        return "\n".join(lines)
+
+    def dossier_text(self) -> str:
+        """This worker's handoff section for the next brain that takes over the box.
+
+        Markdown; appended to .cddc/dossier.md on stand-down (#11). Works for any
+        worker - it reads the shared status() + the challenge's triage fields, so a
+        DeepSeek triage and a Claude harness contribute the same shape."""
+        s = self.status()
+        ch = self.chall
+        lines = [
+            f"## handoff from {self.name} "
+            f"({getattr(self, 'role', '?')} / {s.get('model', s.get('cli', '?'))})",
+            f"lane={self.lane.name} state={ch.state} steps={self.current_step}",
+            "",
+            f"gist: {ch.gist or '-'}",
+            f"technique: {ch.technique or '?'}",
+            f"difficulty: {ch.difficulty}/5 (confidence {ch.confidence or '?'})",
+            f"recommendation: {ch.recommendation or '?'}",
+            f"blockers: {ch.escalation_reason or '-'}",
+            "",
+            "tried (recent):",
+            *([f"  - {t}" for t in self.tried[-15:]] or ["  - (none)"]),
+            "",
+            "findings (recent):",
+            *([f"  - {f}" for f in self.findings[-15:]] or ["  - (none)"]),
+        ]
+        if ch.steers:
+            lines += ["", "operator steers:", *[f"  - {st}" for st in ch.steers[-8:]]]
         return "\n".join(lines)
 
     # --- control surface (registry routes !commands here) -------------------

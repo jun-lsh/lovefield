@@ -443,7 +443,7 @@ async def scenario_sandbox_and_gating() -> None:
 
 # --- scenario 6b: docker-socket gating (role-gated, no docker) -----------
 async def scenario_docker_socket_gating() -> None:
-    print("scenario: docker-socket gating (triage off, specialist on; no docker)")
+    print("scenario: docker socket - role helper + uniform shared box (no docker)")
     from cddc import config
     from cddc.sandbox import Sandbox
 
@@ -480,8 +480,10 @@ async def scenario_docker_socket_gating() -> None:
     assert "CDDC_THREAD=778" in argv2, "thread id not exported for manual-run labeling"
     ok("Sandbox._run_argv binds the socket + compose scope only when docker_sock is set")
 
-    # 3) dispatcher gates by role: a triage agent gets a socket-less sandbox; the
-    #    escalation respawn (role_override='specialist') gets one; explicit '' off.
+    # 3) the SHARED per-challenge box (#12): the dispatcher grants the box the
+    #    socket UNIFORMLY (host opt-in, not role-gated) so any tier can adopt it,
+    #    and a second dispatch on the SAME thread REUSES the very same box object
+    #    (a handoff takes over the live container, it doesn't build a new one).
     reg = Registry()
     disp = Dispatcher(reg)
     saved_sb = config.CDDC_SANDBOX
@@ -492,24 +494,175 @@ async def scenario_docker_socket_gating() -> None:
             ch, ConsoleChannel("web", echo=False),
             kind="agent", model=FakeModel([]), autostart=False,
         )
-        assert triage.sandbox is not None and triage.sandbox.docker_sock is None, "triage got a socket"
-        ch2 = Challenge(id="dk2", name="svc", category="web", thread_id=7002)
+        assert triage.sandbox is not None and triage.sandbox.docker_sock == config.DOCKER_SOCK, \
+            "triage's box must carry the socket (uniform access -> a persistent socket box)"
+        # Escalation on the SAME thread (a fresh Challenge, same thread_id) must take
+        # over the SAME box object - the heart of #12.
+        ch_esc = Challenge(id="dk1", name="svc", category="web", thread_id=7001)
         spec = await disp.dispatch(
-            ch2, ConsoleChannel("web", echo=False),
+            ch_esc, ConsoleChannel("web", echo=False),
             kind="agent", model=FakeModel([]), autostart=False,
             role_override="specialist",
         )
-        assert spec.sandbox is not None and spec.sandbox.docker_sock == config.DOCKER_SOCK, "specialist missing socket"
+        assert spec.sandbox is triage.sandbox, "escalation must REUSE the challenge's box, not build a new one (#12)"
+        # REGRESSION (no-docker): the worker must hand its OWN sandbox to its
+        # toolbox, else run_shell falls through to host execution while the
+        # started container sits unused. This is checkable without docker.
+        assert triage.toolbox.sandbox is triage.sandbox, "triage toolbox not wired to its sandbox -> run_shell would hit host"
+        assert spec.toolbox.sandbox is spec.sandbox, "specialist toolbox not wired to its sandbox -> run_shell would hit host"
+        # A different thread gets its OWN box; explicit docker_sock='' forces it off.
         ch3 = Challenge(id="dk3", name="svc", category="web", thread_id=7003)
         forced = await disp.dispatch(
             ch3, ConsoleChannel("web", echo=False),
             kind="agent", model=FakeModel([]), autostart=False,
             role_override="specialist", docker_sock="",
         )
+        assert forced.sandbox is not triage.sandbox, "a different challenge must get its own box"
         assert forced.sandbox.docker_sock is None, "explicit docker_sock='' should force the socket off"
+        # release_box destroys + forgets the box (challenge end: !kill / !solved).
+        await reg.release_box(7001)
+        assert 7001 not in reg.boxes, "release_box should forget the challenge's box"
     finally:
         config.CDDC_SANDBOX = saved_sb
-    ok("dispatcher: triage socket-less, escalated specialist gets it, explicit '' forces off")
+    ok("shared box: socket uniform, escalation reuses the live box, release_box reaps it")
+
+
+# --- scenario 6b2: handoff dossier (state continuity across takeover) -----
+async def scenario_handoff_dossier() -> None:
+    print("scenario: handoff dossier (state continuity across takeover, no docker)")
+    from cddc.worker import append_dossier, read_dossier
+
+    wd = os.path.join("_files", "simdossier")
+    dpath = os.path.join(wd, ".cddc", "dossier.md")
+    os.makedirs(os.path.dirname(dpath), exist_ok=True)
+    if os.path.exists(dpath):
+        os.remove(dpath)
+
+    # 1) a worker's dossier_text captures its read + attempts + findings.
+    ch = Challenge(id="hd1", name="cont", category="crypto", thread_id=9100, description="x")
+    ch.difficulty = 4
+    ch.technique = "RSA/Franklin-Reiter"
+    ch.gist = "related messages; recover m"
+    ch.recommendation = "deep_solver"
+    chan = ConsoleChannel("crypto", echo=False)
+    prior = AgentWorker(
+        get_lane("crypto"), ch, chan, id="wp", name="crypto-triage",
+        model=FakeModel([]), workdir=wd, sandbox=None,
+        max_steps=10, max_tokens=10_000, role="triage",
+    )
+    prior.tried = ["ran factordb", "tried small-e cube root"]
+    prior.findings = ["n is 2048-bit", "e=3, two related ciphertexts"]
+    sect = prior.dossier_text()
+    assert "RSA/Franklin-Reiter" in sect and "factordb" in sect and "related ciphertexts" in sect, sect
+    ok("dossier_text captures the worker's read, attempts, and findings")
+
+    # 2) append accumulates across a ladder; read_dossier returns the whole history.
+    p = append_dossier(wd, sect)
+    assert p == "/challenge/.cddc/dossier.md", p
+    append_dossier(wd, "## handoff from crypto-spec (specialist)\ntried: lattice reduction")
+    body = read_dossier(wd)
+    assert "crypto-triage" in body and "crypto-spec" in body, "dossier should ACCUMULATE handoffs"
+    ok("append_dossier accumulates triage -> specialist; read_dossier returns the whole history")
+
+    # 3) the INCOMING worker seeds the dossier into its starting context.
+    ch2 = Challenge(id="hd2", name="cont", category="crypto", thread_id=9100, description="x")
+    chan2 = ConsoleChannel("crypto", echo=False)
+    script = [Reply(content="reading the handoff first", tokens=10,
+                    tool_calls=[ToolCall("h1", "submit_flag", {"flag": "CDDC{cont}"})])]
+    incoming = AgentWorker(
+        get_lane("crypto"), ch2, chan2, id="wi", name="crypto-deep",
+        model=FakeModel(script), workdir=wd, sandbox=None,
+        max_steps=5, max_tokens=10_000, role="specialist",
+    )
+    task = asyncio.create_task(incoming.run())
+    assert await wait_until(
+        lambda: any("handoff dossier" in str(m.get("content", "")) for m in incoming.messages),
+        timeout=5), "incoming worker did not seed the dossier into its context"
+    assert any("lattice reduction" in str(m.get("content", "")) for m in incoming.messages), \
+        "dossier content (prior attempts) missing from the incoming context"
+    incoming.mark_solved()
+    await task
+    ok("incoming worker reads the persisted dossier into its starting context")
+
+
+# --- scenario 6b3: headless Claude Code worker (stream-json events) -------
+async def scenario_cc_headless() -> None:
+    print("scenario: headless Claude Code worker (stream-json events, no docker)")
+    import json as _json
+
+    from cddc.cc_worker import CCWorker
+    from cddc.headless import Event, FakeHeadless
+
+    ch = Challenge(id="cc1", name="cc-chal", category="rev", thread_id=9200,
+                   description="reverse the binary")
+    chan = ConsoleChannel("rev", echo=False)
+    wd = os.path.join("_files", "simcc")
+    os.makedirs(wd, exist_ok=True)
+    for fn in (".mcp.json", "CLAUDE.md", ".cddc_solution"):
+        p = os.path.join(wd, fn)
+        if os.path.exists(p):
+            os.remove(p)
+
+    session = FakeHeadless([[
+        Event(kind="init", session_id="s1", text="model=deepseek-v4-pro mcp=['decompiler']"),
+        Event(kind="text", text="Listing functions via the decompiler MCP."),
+        Event(kind="tool", tool="mcp__decompiler__decompile_function", tool_input='{"name":"main"}'),
+        Event(kind="result", text="Recovered the key; flag written.", cost_usd=0.0021, tokens=1200),
+    ]], solution="CDDC{cc_headless}")
+    w = CCWorker(
+        get_lane("rev"), ch, chan, id="wcc", name="rev-cc",
+        session=session, role="specialist",
+        decompiler_url="http://cddc-decompiler:8000/mcp", workdir=wd, halt_on_flag=True,
+    )
+    task = asyncio.create_task(w.run())
+
+    assert await wait_until(lambda: ch.state == "candidate", timeout=5), \
+        f"cc worker never reached candidate; posts={chan.posts!r}"
+    assert "CDDC{cc_headless}" in w.status()["candidates"], "declared flag not captured"
+    assert any("tool `mcp__decompiler__decompile_function`" in p for p in chan.posts), \
+        "structured tool call not narrated"
+    assert any("turn done" in p and "$" in p for p in chan.posts), "result/cost not narrated"
+    # box config written for MCP + standalone (docker exec -it box claude) use
+    with open(os.path.join(wd, ".mcp.json"), encoding="utf-8") as f:
+        mcp = _json.load(f)
+    assert mcp["mcpServers"]["decompiler"]["headers"]["Host"] == "localhost:8000", mcp
+    assert os.path.exists(os.path.join(wd, "CLAUDE.md")), "CLAUDE.md not written"
+    ok("cc worker narrates events, writes .mcp.json(+Host)/CLAUDE.md, declares flag via sentinel")
+
+    w.mark_solved()
+    await task
+    assert ch.state == "solved"
+    assert session.stopped, "session not stopped on solve"
+    ok("cc worker stands down on !solved and stops the session")
+
+    # triage tier: the agent writes .cddc/triage.md -> worker posts a TRIAGE REPORT and
+    # captures difficulty/recommendation onto the challenge (for !escalate + the dossier).
+    wd2 = os.path.join("_files", "simcctri")
+    os.makedirs(os.path.join(wd2, ".cddc"), exist_ok=True)
+    sol = os.path.join(wd2, ".cddc_solution")
+    if os.path.exists(sol):
+        os.remove(sol)
+    with open(os.path.join(wd2, ".cddc", "triage.md"), "w", encoding="utf-8") as f:
+        f.write("gist: RSA with small e\ncategory: crypto\ntechnique: Hastad cube root\n"
+                "difficulty: 3\nblockers: needs sage\nrecommendation: escalate\n")
+    ch_t = Challenge(id="ct1", name="tri", category="crypto", thread_id=9300, description="x")
+    chan_t = ConsoleChannel("crypto", echo=False)
+    sess_t = FakeHeadless([[
+        Event(kind="init", session_id="t1", text="model=deepseek-v4-flash"),
+        Event(kind="text", text="assessing the challenge"),
+        Event(kind="result", text="triage filed", tokens=200),
+    ]], solution="")
+    wt = CCWorker(get_lane("crypto"), ch_t, chan_t, id="wt", name="crypto-tri",
+                  session=sess_t, role="triage", workdir=wd2)
+    task_t = asyncio.create_task(wt.run())
+    assert await wait_until(lambda: ch_t.state == "needs_human", timeout=5), \
+        f"triage worker didn't halt with a report; posts={chan_t.posts!r}"
+    assert ch_t.difficulty == 3 and ch_t.recommendation == "escalate", \
+        f"triage fields not captured: diff={ch_t.difficulty} rec={ch_t.recommendation!r}"
+    assert any("TRIAGE REPORT" in p for p in chan_t.posts), "no triage report block posted"
+    ok("cc triage tier files .cddc/triage.md -> TRIAGE REPORT + captured difficulty/recommendation")
+    wt.cancel()
+    await task_t
 
 
 # --- scenario 6c: web_search + read_url (provider-agnostic, fake backend) -
@@ -602,6 +755,7 @@ async def scenario_sandbox_agent() -> None:
         ]),
     ]
     sb = Sandbox(config.CDDC_SANDBOX_IMAGE, ch.thread_id, workdir)
+    await sb.release()  # drop any stale box from a prior run (start() now REUSES a live one)
     w = AgentWorker(
         get_lane("pwn"), ch, chan,
         id="wsa", name="pwn-sandbox-a", model=FakeModel(script),
@@ -626,9 +780,13 @@ async def scenario_sandbox_agent() -> None:
     w.mark_solved()
     await task
     assert ch.state == "solved"
-    assert not sb.started, "sandbox should be marked stopped after teardown"
-    assert any("[sandbox] container `cddc-556` removed" in p for p in chan.posts), "sandbox teardown not posted"
-    ok("agent tears the Docker sandbox down on !solved")
+    # The box now PERSISTS past the worker (#12): a worker exit must NOT remove it
+    # (a fresh brain could take over). It's reaped explicitly at challenge end.
+    assert sb.started, "box must persist after the worker exits (takeover), not be torn down"
+    assert not any("removed" in p for p in chan.posts), "worker should no longer announce a teardown"
+    await sb.release()
+    assert not sb.started, "release() must actually remove the box"
+    ok("box persists across the worker's exit; release() reaps it at challenge end")
 
 
 # --- scenario 7b: real harness pipeline (docker + claude CLI in tmux) ------
@@ -979,6 +1137,10 @@ async def main() -> None:
     await scenario_sandbox_and_gating()
     print()
     await scenario_docker_socket_gating()
+    print()
+    await scenario_handoff_dossier()
+    print()
+    await scenario_cc_headless()
     print()
     await scenario_web_search()
     print()

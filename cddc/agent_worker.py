@@ -22,7 +22,15 @@ from .channel import Channel
 from .lanes.base import Lane
 from .models import ModelClient, Reply, assistant_message
 from .tools import Toolbox, tool_specs
-from .worker import Worker, _fence, _md_escape, is_placeholder_flag, summary
+from .worker import (
+    DOSSIER_CONTAINER_PATH,
+    Worker,
+    _fence,
+    _md_escape,
+    is_placeholder_flag,
+    read_dossier,
+    summary,
+)
 
 # Per-agent alignment lives in markdown, NOT here - teammates edit cddc/skills/
 # without touching Python. The system prompt is STACKED from four parts so the
@@ -149,8 +157,14 @@ class AgentWorker(Worker):
         self.role = role
         self.model = model
         self.sandbox = sandbox
+        self.workdir = workdir  # read the handoff dossier from here on start (#11)
+        # CRITICAL: hand the SAME sandbox to the toolbox, else run_shell falls
+        # through to host execution (tools.py) while self.sandbox.start() spins up
+        # a container that's never used - the agent sees the bare host, not the
+        # ctf-sandbox toolchain.
         self.toolbox = Toolbox(
             workdir, shell_timeout, skills_dir=str(SKILLS_DIR),
+            sandbox=sandbox,
             searcher=searcher, reader=reader,
         )
         self.max_steps = max_steps
@@ -175,18 +189,16 @@ class AgentWorker(Worker):
         )
         if self.sandbox is not None:
             try:
-                await self.sandbox.start()
+                await self.sandbox.start()  # creates the box, or REUSES a live one (#12)
                 sock = " + docker socket" if getattr(self.sandbox, "docker_sock", None) else ""
                 await self._post(f"[sandbox] container `{self.sandbox.name}` up{sock}")
             except Exception as e:
                 await self._post(f"[sandbox] failed to start: {e!r} - standing down", force=True)
                 return await self._exit_killed()
-        try:
-            await self._run_loop()
-        finally:
-            if self.sandbox is not None:
-                await self.sandbox.teardown()
-                await self._post(f"[sandbox] container `{self.sandbox.name}` removed", force=True)
+        # The box is OWNED by the Registry, not this worker: it PERSISTS across
+        # handoffs so a fresh brain takes it over live (#12). We never tear it down
+        # on exit - the bot releases it at challenge end (!kill / !solved).
+        await self._run_loop()
 
     async def _run_loop(self) -> None:
         files = ", ".join(os.path.basename(f) for f in self.chall.files) or "(none)"
@@ -203,6 +215,21 @@ class AgentWorker(Worker):
                 ),
             },
         ])
+        # State continuity (#11): if a prior worker handed off, it left a dossier on
+        # this challenge's (persistent) box. Seed it so the takeover continues the
+        # work instead of restarting from scratch in a warm container.
+        dossier = read_dossier(self.workdir)
+        if dossier:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[handoff dossier] You are taking over a LIVE box that prior worker(s) "
+                    "on THIS challenge already used - their installed packages, running "
+                    "services, and scratch files are still here. Read what they did and BUILD "
+                    "ON IT; do not repeat their steps. Full dossier (also on disk at "
+                    f"{DOSSIER_CONTAINER_PATH}):\n\n{dossier}"
+                ),
+            })
         specs = _specs_for_lane(self.lane)
         # Drop web tools the host hasn't configured (no search provider -> no
         # web_search; reader is keyless so it normally stays).

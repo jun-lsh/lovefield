@@ -11,9 +11,26 @@ Discord-agnostic; stdlib only.
 from __future__ import annotations
 
 import asyncio
+import os
 import pathlib
 
 MAX_OUTPUT = 4000  # chars of tool output fed back to the model
+# Hard ceiling for a single run_shell timeout_sec. The model can ask for more than
+# the 30s default for slow ops (docker build, analysis) up to this; services should
+# be backgrounded (`docker ... -d`) instead of blocking.
+_MAX_SHELL_TIMEOUT = int(os.environ.get("CDDC_SHELL_MAX_TIMEOUT", "600"))
+
+
+def _looks_slow(cmd: str) -> bool:
+    """Commands that routinely blow the 30s default. Safety net so a foreground
+    `docker build` / `compose up` doesn't get killed when the agent forgets to pass
+    timeout_sec (the classic 'it gave up on the docker build' failure)."""
+    c = cmd.lower()
+    if "docker build" in c or "docker buildx" in c:
+        return True
+    if ("compose up" in c or "docker-compose up" in c) and " -d" not in c and "--detach" not in c:
+        return True
+    return False
 
 
 def tool_specs() -> list[dict]:
@@ -22,8 +39,18 @@ def tool_specs() -> list[dict]:
         _spec(
             "run_shell",
             "Run a shell command in the challenge workdir (python is available). "
-            "Returns combined stdout+stderr, truncated.",
-            {"command": {"type": "string"}},
+            "Returns combined stdout+stderr, truncated. Default timeout 30s; for "
+            "SLOW commands (e.g. `docker build`, long analysis) pass timeout_sec "
+            "(up to 600). For long-running SERVICES use a DETACHED docker run "
+            "(`docker compose up -d` / `docker run -d ...`) so it returns at once "
+            "instead of blocking the call.",
+            {
+                "command": {"type": "string"},
+                "timeout_sec": {
+                    "type": "integer",
+                    "description": "max seconds to wait for the command (default 30, max 600)",
+                },
+            },
             ["command"],
         ),
         _spec(
@@ -199,7 +226,7 @@ class Toolbox:
     async def run(self, name: str, args: dict) -> str:
         try:
             if name == "run_shell":
-                return await self._shell(str(args.get("command", "")))
+                return await self._shell(str(args.get("command", "")), args.get("timeout_sec"))
             if name == "read_file":
                 return self._read(str(args.get("path", "")))
             if name == "write_file":
@@ -234,11 +261,19 @@ class Toolbox:
             raise ValueError(f"path escapes skills dir: {path}")
         return p
 
-    async def _shell(self, command: str) -> str:
+    async def _shell(self, command: str, timeout_sec=None) -> str:
         if not command.strip():
             return "(empty command)"
+        t = self.shell_timeout
+        if timeout_sec:
+            try:
+                t = max(1, min(int(timeout_sec), _MAX_SHELL_TIMEOUT))
+            except (TypeError, ValueError):
+                t = self.shell_timeout
+        elif _looks_slow(command):
+            t = max(self.shell_timeout, 300)  # auto-extend obvious slow builds
         if self.sandbox is not None:
-            return _truncate(await self.sandbox.exec(command, self.shell_timeout))
+            return _truncate(await self.sandbox.exec(command, t))
         proc = await asyncio.create_subprocess_shell(
             command,
             cwd=str(self.workdir),
@@ -246,10 +281,10 @@ class Toolbox:
             stderr=asyncio.subprocess.STDOUT,
         )
         try:
-            out, _ = await asyncio.wait_for(proc.communicate(), timeout=self.shell_timeout)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=t)
         except asyncio.TimeoutError:
             proc.kill()
-            return f"(command timed out after {self.shell_timeout}s)"
+            return f"(command timed out after {t}s - for a slow build pass a larger timeout_sec, or background a service with `docker ... -d`)"
         return _truncate(out.decode("utf-8", "replace")) or "(no output)"
 
     def _read(self, path: str) -> str:

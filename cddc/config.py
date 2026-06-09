@@ -94,6 +94,12 @@ AGENT_PROVIDER = _envs("CDDC_PROVIDER", "deepseek").lower()
 # heavy Claude Code CLI specialist in the box (once the docker layers land - that
 # tier reaches the pwn/rev/etc. tools). Triage always stays CDDC_WORKER.
 SPECIALIST_KIND = _envs("CDDC_SPECIALIST_KIND", "agent").lower()
+# The DEEP tier: what `!escalate deep` respawns - the heaviest brain, on the
+# deep_solver lane/doctrine. Defaults to "harness" (the Claude Code box agent) so
+# the ladder is real: flash triage -> DeepSeek-pro specialist -> Claude deep. Needs
+# the harness prereqs (claude/codex login, tmux). Set CDDC_DEEP_KIND=agent on a host
+# without the harness to keep `deep` as a DeepSeek-pro on the deep_solver lane.
+DEEP_KIND = _envs("CDDC_DEEP_KIND", "harness").lower()
 
 # DeepSeek (OpenAI-compatible).
 DEEPSEEK_API_KEY = _envs("DEEPSEEK_API_KEY", "")
@@ -104,6 +110,59 @@ DEEPSEEK_BASE_URL = _envs("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 # - ON by default since the DeepSeek tier IS triage, which writes the difficulty
 # report and shouldn't rabbit-hole. Flip off for a dumb high-volume churn tier.
 CHURN_MODEL = _envs("CDDC_CHURN_MODEL", "deepseek-v4-flash")
+# The ESCALATION tier's model (specialist / deep / race) - a stronger brain than
+# triage's flash. Defaults to v4-pro (~3x flash's price, still cents/solve); set to
+# deepseek-v4-flash if pro isn't enabled on your account. Only used when the
+# escalation kind is "agent" (deepseek); the "harness" kind ignores it.
+SPECIALIST_MODEL = _envs("CDDC_SPECIALIST_MODEL", "deepseek-v4-pro")
+
+# --- Claude Code headless harness (worker kind "cc") ------------------------
+# Drive ONE `claude` CLI per tier, swapping only the model BACKEND. DeepSeek ships
+# an official Anthropic-compatible endpoint, so the same CLI runs on DeepSeek for the
+# cheap tiers and on the Anthropic SUBSCRIPTION (Opus 4.8) for the deep tier.
+# Set CDDC_WORKER / CDDC_SPECIALIST_KIND / CDDC_DEEP_KIND = "cc" to use this path.
+CC_DEEPSEEK_ANTHROPIC_URL = _envs("CDDC_CC_DEEPSEEK_URL", "https://api.deepseek.com/anthropic")
+CC_FLASH_MODEL = _envs("CDDC_CC_FLASH_MODEL", "deepseek-v4-flash")  # triage tier
+CC_PRO_MODEL = _envs("CDDC_CC_PRO_MODEL", "deepseek-v4-pro")        # specialist tier
+# Backstop wall-clock cap (seconds) on a single TRIAGE turn: a flash turn that ignores
+# "assess, don't grind" still stops and halts for the operator. 0 = no cap. Solver
+# tiers (specialist/deep) run uncapped - the operator controls them via !steer/!kill.
+CC_TRIAGE_TURN_SECS = int(_envs("CDDC_CC_TRIAGE_TURN_SECS", "300"))
+
+
+def cc_tier_for(role: str, lane_name: str) -> str:
+    """Map a (role, lane) to a CC tier: triage | specialist | deep."""
+    if lane_name == "deep_solver":
+        return "deep"
+    return "specialist" if (role or "").strip().lower() == "specialist" else "triage"
+
+
+def cc_profile(tier: str) -> tuple[dict, dict]:
+    """(env_profile, secret_env) for a CC tier's `claude` spawn.
+
+    env_profile -> non-secret `-e K=V` flags (base url, model ids, effort); secret_env
+    -> `-e K` flags whose VALUE rides in the spawn's own env, never on the argv.
+
+    SAFETY INVARIANT (do not break): we NEVER set ANTHROPIC_API_KEY anywhere. The deep
+    tier returns EMPTY env, so the CLI falls through to the mounted ~/.claude
+    SUBSCRIPTION login -> Opus 4.8, with NO metered Anthropic-API billing. The cheap
+    tiers authenticate to DeepSeek (ANTHROPIC_AUTH_TOKEN = the DeepSeek key) against
+    DeepSeek's endpoint - DeepSeek billing only.
+    """
+    if tier == "deep":
+        return {}, {}  # no anthropic env -> mounted subscription -> Opus 4.8 (no API burn)
+    model = CC_PRO_MODEL if tier == "specialist" else CC_FLASH_MODEL
+    env = {
+        "ANTHROPIC_BASE_URL": CC_DEEPSEEK_ANTHROPIC_URL,
+        "ANTHROPIC_MODEL": model,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": CC_PRO_MODEL,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": CC_PRO_MODEL,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": CC_FLASH_MODEL,
+        "CLAUDE_CODE_SUBAGENT_MODEL": CC_FLASH_MODEL,
+        "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    }
+    secret = {"ANTHROPIC_AUTH_TOKEN": DEEPSEEK_API_KEY} if DEEPSEEK_API_KEY else {}
+    return env, secret
 CHURN_THINKING = _envs("CDDC_CHURN_THINKING", "1").lower() not in ("0", "false", "no", "")
 
 # Claude (Anthropic Messages API).
@@ -175,32 +234,50 @@ DISABLE_HANDOFF = _envs("CDDC_DISABLE_HANDOFF", "0").lower() in ("1", "true", "y
 # pwn/rev binaries. Requires the bot to run as a docker-capable user.
 CDDC_SANDBOX = _envs("CDDC_SANDBOX", "local").lower()
 CDDC_SANDBOX_IMAGE = _envs("CDDC_SANDBOX_IMAGE", "ctf-sandbox")
+# The ai lane is torch-heavy, so it uses a SEPARATE image (built `--target ai`),
+# keeping the lean default image free of the torch tax on every rebuild. Other
+# lanes use CDDC_SANDBOX_IMAGE.
+CDDC_SANDBOX_IMAGE_AI = _envs("CDDC_SANDBOX_IMAGE_AI", "ctf-sandbox:ai")
+
+
+def sandbox_image_for_lane(lane_name: str) -> str:
+    return CDDC_SANDBOX_IMAGE_AI if lane_name == "ai" else CDDC_SANDBOX_IMAGE
 # SELinux bind-mount relabel flag ("z" shared / "Z" private). EMPTY by default -
 # it's a no-op on WSL/Docker Desktop and only needed on SELinux-enforcing hosts
 # (Fedora/RHEL), where you'd set CDDC_SANDBOX_MOUNT_FLAG=Z so the container can
 # read the mount.
 CDDC_SANDBOX_MOUNT_FLAG = _envs("CDDC_SANDBOX_MOUNT_FLAG", "").strip().lstrip(":")
 
-# Docker-OUT-of-docker: host daemon socket bound into a worker's sandbox so the
-# agent inside can stand up service containers (a `docker compose up` challenge,
-# a target box). It is host-root, so it is NOT handed out casually:
-#   - triage NEVER gets it (a throwaway triage container that spins a service then
-#     hands off would just waste the spin-up). Triage that hits a needs-a-box
-#     challenge SELF-ESCALATES; the respawned specialist gets the socket. That
-#     near-immediate handoff is the intended path, not arming triage.
-#   - any non-triage role (specialist / deep / windows) gets it.
-# Set CDDC_DOCKER_SOCK="" to disable everywhere; CDDC_TRIAGE_SOCKET=1 to also arm
-# triage (the "exception" knob, off by default).
+# Docker-OUT-of-docker: host daemon socket bound into the challenge box so the agent
+# inside can stand up service containers (a `docker compose up` challenge, a target
+# box). It is host-root. NOTE: the bot now runs ONE persistent box per challenge that
+# every tier SHARES and takes over on handoff (task #12), and you cannot add a socket
+# to a running container - so the dispatcher gives that box the socket UNIFORMLY
+# whenever CDDC_DOCKER_SOCK is set (see Dispatcher._build_box), not role-gated.
+# docker_sock_for_role() below keeps the older role-gating ONLY for the standalone
+# tryout helper (a throwaway single-worker box that never hands off).
+# Set CDDC_DOCKER_SOCK="" to disable the socket everywhere; CDDC_TRIAGE_SOCKET=1 arms
+# triage in the tryout helper (the "exception" knob, off by default).
 DOCKER_SOCK = _envs("CDDC_DOCKER_SOCK", "/var/run/docker.sock")
 TRIAGE_SOCKET = _envs("CDDC_TRIAGE_SOCKET", "0").lower() in ("1", "true", "yes")
 # Pass the host GPU into the sandbox (docker --gpus all) so the ai lane's CUDA
 # torch can use it. Needs the NVIDIA driver + nvidia-container-toolkit on the host;
 # off by default (most hosts have no GPU, and the flag errors without the toolkit).
 CDDC_SANDBOX_GPU = _envs("CDDC_SANDBOX_GPU", "0").lower() in ("1", "true", "yes")
+# Shared decompiler service (pyghidra-mcp). Agents reach it over a docker network:
+# set CDDC_SANDBOX_NETWORK to the network the `cddc-decompiler` container is on, and
+# the sandbox joins it + gets CDDC_DECOMPILER_URL so the `dc` client can find it.
+# Empty network -> no decompiler wiring (dc will just fail to connect).
+CDDC_SANDBOX_NETWORK = _envs("CDDC_SANDBOX_NETWORK", "")
+CDDC_DECOMPILER_URL = _envs("CDDC_DECOMPILER_URL", "http://cddc-decompiler:8000/mcp")
 
 
 def docker_sock_for_role(role: str) -> str:
-    """Socket path this role's sandbox should bind, or "" for none."""
+    """Socket path this role's sandbox should bind, or "" for none.
+
+    Role-gated (triage withheld unless CDDC_TRIAGE_SOCKET). Used only by the
+    standalone `tryout` helper now - the bot's shared per-challenge box gets the
+    socket uniformly (see the DOCKER_SOCK note above / Dispatcher._build_box)."""
     if not DOCKER_SOCK:
         return ""
     if (role or "").strip().lower() == "triage" and not TRIAGE_SOCKET:

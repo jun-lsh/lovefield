@@ -1,14 +1,17 @@
+# syntax=docker/dockerfile:1
 # CDDC challenge solver sandbox image.
 #
-# This is intentionally a placeholder scaffold. Each stage names the layer of
-# tooling it will eventually own; package installs are left as TODO comments so
-# we can grow the image deliberately instead of baking a huge opaque blob.
+# Cumulative chain: base -> recon -> harness -> web -> crypto -> stego -> pwn ->
+# rev -> forens -> ai -> sandbox.  Plus a `decompiler` side-stage (FROM rev) for
+# the shared pyghidra-mcp service. Heavy pip layers use BuildKit cache mounts
+# (--mount=type=cache) so wheels (esp. the ~2.5GB torch) download ONCE and survive
+# rebuilds - keep BuildKit on (default in Docker Desktop; else DOCKER_BUILDKIT=1).
 #
-# Build the combined placeholder image:
+# Build the full agent image:
 #   docker build -f sandbox/Dockerfile.sandbox -t ctf-sandbox sandbox
-#
-# Build a specific layer while iterating:
+# Build a specific layer / the decompiler service:
 #   docker build -f sandbox/Dockerfile.sandbox --target pwn -t ctf-sandbox:pwn sandbox
+#   docker build -f sandbox/Dockerfile.sandbox --target decompiler -t ctf-sandbox:decompiler sandbox
 
 ARG UBUNTU_VERSION=22.04
 
@@ -534,15 +537,19 @@ RUN apt-get update \
 # libs; to actually USE the GPU, run the sandbox with CDDC_SANDBOX_GPU=1 (-> docker
 # --gpus all) on a host with the NVIDIA driver + nvidia-container-toolkit.
 ARG TORCH_VARIANT=gpu
-RUN python3 -m venv /opt/ai-venv \
-    && /opt/ai-venv/bin/pip install --no-cache-dir --upgrade pip \
+# BuildKit cache mount: the (huge) wheels download ONCE to the host cache and are
+# reused on every rebuild - so even when this layer is invalidated, no re-download.
+# The cache lives in the mount, NOT the image, so dropping --no-cache-dir is free.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m venv /opt/ai-venv \
+    && /opt/ai-venv/bin/pip install --upgrade pip \
     && if [ "$TORCH_VARIANT" = "cpu" ]; then \
-         /opt/ai-venv/bin/pip install --no-cache-dir \
+         /opt/ai-venv/bin/pip install \
              --index-url https://download.pytorch.org/whl/cpu torch torchvision ; \
        else \
-         /opt/ai-venv/bin/pip install --no-cache-dir torch torchvision ; \
+         /opt/ai-venv/bin/pip install torch torchvision ; \
        fi \
-    && /opt/ai-venv/bin/pip install --no-cache-dir \
+    && /opt/ai-venv/bin/pip install \
          pandas safetensors scikit-learn scipy transformers \
     && ln -sf /opt/ai-venv/bin/python /usr/local/bin/ai-python
 
@@ -565,7 +572,59 @@ RUN printf '%s\n' \
     'isolated so its numpy 2.x stays clear of Sage (system numpy stays 1.x)' \
     > /opt/cddc-ai.txt
 
-# Final image includes every layer above.
-FROM ai AS sandbox
+# ---- decompiler service (shared headless Ghidra MCP) ------------------------
+# Build:  docker build -f sandbox/Dockerfile.sandbox --target decompiler -t ctf-sandbox:decompiler sandbox
+# ONE long-running pyghidra-mcp server (a single JVM) the whole fleet hits over MCP
+# - DeepSeek agents via the `dc` client, the Claude/Codex harness via /mcp natively.
+# Reuses rev's Ghidra 12.1 + GolangAnalyzer; the heavy semantic-search deps
+# (chromadb/onnxruntime/HF) live in THIS image only, not the agent sandbox. Run:
+#   docker network create cddc-net
+#   docker run -d --name cddc-decompiler --network cddc-net \
+#     -v "$PWD/_files":/files:ro -v cddc-ghidra-proj:/projects ctf-sandbox:decompiler
+# then point agents at it with CDDC_SANDBOX_NETWORK=cddc-net (see cddc/.env.example).
+FROM rev AS decompiler
+ENV GHIDRA_INSTALL_DIR=/opt/ghidra
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin \
+        uv tool install --python 3.11 pyghidra-mcp \
+    && mkdir -p /projects /files
+
+# Robust-name-lookup overlay: upstream pyghidra-mcp resolves a function name only
+# against its PRIMARY symbol, so GolangAnalyzer's entry-point labels (main.foo) miss
+# by name while by-address works -- agents waste calls on a tool we control. The
+# overlay (sandbox/cddc_ghidra_patch.py) installs a meta-path hook that patches
+# GhidraTools._lookup_functions the moment the server imports it (after the JVM is
+# up); it is additive (never matches less than upstream). Wired via a 1-line .pth in
+# the venv's site-packages; the interpreter is read from the console-script shebang
+# so this survives the uv tool dir name. Iterate without a rebuild: see the file head.
+COPY cddc_ghidra_patch.py /opt/cddc_ghidra_patch.py
+RUN PY="$(sed -n '1s/^#!//p' /usr/local/bin/pyghidra-mcp)" \
+    && sp="$("$PY" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')" \
+    && cp /opt/cddc_ghidra_patch.py "$sp/cddc_ghidra_patch.py" \
+    && printf 'import cddc_ghidra_patch\n' > "$sp/cddc_ghidra_patch.pth" \
+    && "$PY" -c "import cddc_ghidra_patch as p, sys; \
+assert any(type(f).__name__ == '_Finder' for f in sys.meta_path), 'import hook not armed'; \
+print('CDDC ghidra patch: import hook armed for pyghidra_mcp.tools')"
+EXPOSE 8000
+# --no-wait-for-analysis: serve immediately; binaries imported on demand analyse in
+# the background (agents poll `dc binaries`). --project-path persists analysis.
+CMD ["sh", "-lc", "pyghidra-mcp -t streamable-http -o 0.0.0.0 -p 8000 --project-path /projects --no-wait-for-analysis"]
+
+# ---- final agent image: the LEAN default (FROM forens, NOT ai) ---------------
+# The everyday agent image. It deliberately does NOT inherit `ai` (torch/ML), so a
+# normal rebuild never pays the ~2.5GB torch tax. The ML stack is the `ai` stage
+# above, built separately as `--target ai -t ctf-sandbox:ai` and used ONLY by the
+# ai lane (the dispatcher picks that image for it). `dc` decompiler client included.
+FROM forens AS sandbox
+
+# `dc`: thin client for the shared decompiler service (talks MCP over
+# CDDC_DECOMPILER_URL; no per-agent JVM). Light deps in their own venv. `dc --help`.
+# venv + wrapper first (stable -> cached); COPY the script LAST so editing dc.py
+# only re-runs the tiny COPY, not the pip install.
+RUN python3 -m venv /opt/dc-venv \
+    && /opt/dc-venv/bin/pip install --no-cache-dir mcp \
+    && printf '#!/bin/sh\nexec /opt/dc-venv/bin/python /opt/dc.py "$@"\n' > /usr/local/bin/dc \
+    && chmod +x /usr/local/bin/dc
+COPY dc.py /opt/dc.py
 
 CMD ["/bin/bash"]

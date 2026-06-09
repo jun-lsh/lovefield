@@ -69,10 +69,12 @@ async def run(args: argparse.Namespace) -> None:
         # triage role -> no docker socket (config gates it); a --role specialist
         # tryout would get one. Recon tools come from the image, not the socket.
         sandbox = Sandbox(
-            config.CDDC_SANDBOX_IMAGE, thread_id, workdir,
+            config.sandbox_image_for_lane(lane.name), thread_id, workdir,
             docker_sock=config.docker_sock_for_role(args.role) or None,
             mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
             gpu=config.CDDC_SANDBOX_GPU,
+            network=config.CDDC_SANDBOX_NETWORK,
+            decompiler_url=config.CDDC_DECOMPILER_URL,
         )
 
     searcher = search.make_searcher(
@@ -133,6 +135,10 @@ async def run(args: argparse.Namespace) -> None:
         await asyncio.wait_for(task, timeout=10)
     except (asyncio.TimeoutError, Exception):
         pass
+    # The box now PERSISTS past a worker (#12), so this standalone tool must reap
+    # it explicitly - there's no bot/registry here to release it on challenge end.
+    if sandbox is not None:
+        await sandbox.release()
 
 
 def main() -> None:

@@ -28,6 +28,37 @@ class Dispatcher:
         self.default_location = default_location
         self._n = 0  # monotonic worker counter -> ids/names
 
+    def _build_box(self, chall: Challenge, lane: Lane, *, docker_sock: str | None):
+        """Construct the per-challenge box with the UNIFORM superset of privileges.
+
+        The box is SHARED by every tier on the challenge and created ONCE (task #12),
+        so it must carry everything ANY tier might need - you cannot add a mount or a
+        socket to a running container. Per the uniform-tool-access doctrine:
+          - docker socket: granted whenever the host configured one (CDDC_DOCKER_SOCK),
+            NOT role-gated, so triage's box is ALREADY a socket box the specialist
+            adopts on handoff. An explicit `docker_sock` arg still overrides ("" = off).
+          - harness CLI creds: mounted whenever credential-sharing is on (a no-op when
+            the host has no claude/codex login), so a Claude/Codex harness can take
+            over a box a DeepSeek triage created.
+        Image + GPU stay lane-derived (an ai challenge stays on the ai image/GPU across
+        tiers); a !lane reroute across the ai boundary keeps the original image - !kill
+        + !start to switch images. Only builds the object; start() launches it lazily.
+        """
+        from .harness import credential_mounts  # pure-stdlib helper; libtmux is lazy
+        from .sandbox import Sandbox
+
+        workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
+        sock = docker_sock if docker_sock is not None else config.DOCKER_SOCK
+        creds = credential_mounts(config.HARNESS_USER) if config.HARNESS_SHARE_CREDS else []
+        return Sandbox(
+            config.sandbox_image_for_lane(lane.name), chall.thread_id, workdir,
+            extra_mounts=creds, docker_sock=(sock or None),
+            mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
+            gpu=config.CDDC_SANDBOX_GPU,
+            network=config.CDDC_SANDBOX_NETWORK,
+            decompiler_url=config.CDDC_DECOMPILER_URL,
+        )
+
     def pick_lane(self, chall: Challenge, *, override: str | None = None) -> Lane:
         """Resolve the INITIAL lane: explicit `!lane` override > category.
 
@@ -99,16 +130,11 @@ class Dispatcher:
             )
             sandbox = None
             if config.CDDC_SANDBOX == "docker":
-                from .sandbox import Sandbox
-
-                # Socket is a non-triage privilege (see config.docker_sock_for_role);
-                # an explicit `docker_sock` arg overrides the role default.
-                sock = docker_sock if docker_sock is not None else config.docker_sock_for_role(role)
-                sandbox = Sandbox(
-                    config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
-                    docker_sock=sock or None,
-                    mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
-                    gpu=config.CDDC_SANDBOX_GPU,
+                # The ONE shared box for this challenge: created on the first worker,
+                # REUSED (not recreated) by every later worker on handoff (#12).
+                sandbox = self.registry.get_box(
+                    chall.thread_id,
+                    lambda: self._build_box(chall, lane, docker_sock=docker_sock),
                 )
             # Web tools (provider-agnostic): DDG default / Serper keyed search +
             # Jina extraction. None searcher (provider="none") -> tool withheld.
@@ -141,31 +167,23 @@ class Dispatcher:
                 reader=reader,
             )
         elif kind == "harness":
-            from .harness import TmuxHarness, credential_mounts
+            from .harness import TmuxHarness
             from .harness_worker import HarnessWorker
-            from .sandbox import Sandbox
 
             workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
             which = (cli or config.HARNESS_CLI).lower()
             launch = config.CODEX_CLI_CMD if which == "codex" else config.CLAUDE_CLI_CMD
             keys_csv = config.CODEX_STARTUP_KEYS if which == "codex" else config.CLAUDE_STARTUP_KEYS
             startup_keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
-            # Share the host's claude/codex login into the container so the CLI is
-            # already authenticated (otherwise it stalls on the login screen).
-            creds = credential_mounts(config.HARNESS_USER) if config.HARNESS_SHARE_CREDS else []
             role = role_override or (
                 "specialist" if lane.default_mode == "specialist" else "triage"
             )
-            # Socket is a non-triage privilege (see config.docker_sock_for_role);
-            # an explicit `docker_sock` arg overrides the role default.
-            sock = docker_sock if docker_sock is not None else config.docker_sock_for_role(role)
-            # The container is MANDATORY here - the CLI runs inside it via
-            # `docker exec`, so we always build a Sandbox (ignoring CDDC_SANDBOX).
-            sandbox = Sandbox(
-                config.CDDC_SANDBOX_IMAGE, chall.thread_id, workdir,
-                extra_mounts=creds, docker_sock=sock or None,
-                mount_flag=config.CDDC_SANDBOX_MOUNT_FLAG,
-                gpu=config.CDDC_SANDBOX_GPU,
+            # The container is MANDATORY here (the CLI runs inside it via docker
+            # exec), so we always take the shared box - reusing whatever a prior
+            # triage/agent built (with its creds + socket), or creating it now (#12).
+            sandbox = self.registry.get_box(
+                chall.thread_id,
+                lambda: self._build_box(chall, lane, docker_sock=docker_sock),
             )
             session = TmuxHarness(
                 which, sandbox, workdir,
@@ -193,6 +211,41 @@ class Dispatcher:
                 flag_blacklist=config.FLAG_BLACKLIST,
                 summarizer=summarizer,
                 summarize_every=config.HARNESS_SUMMARIZE_SECS,
+            )
+        elif kind == "cc":
+            # Headless Claude Code (stream-json, no tmux). Same shared box, but the
+            # CLI runs inside it; the per-TIER model is just the env profile (DeepSeek
+            # flash/pro, or the subscription's Opus 4.8 - never a metered Anthropic key).
+            from .cc_worker import CCWorker
+            from .headless import HeadlessClaude
+
+            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
+            role = role_override or (
+                "specialist" if lane.default_mode == "specialist" else "triage"
+            )
+            sandbox = self.registry.get_box(
+                chall.thread_id,
+                lambda: self._build_box(chall, lane, docker_sock=docker_sock),
+            )
+            tier = config.cc_tier_for(role, lane.name)
+            env_profile, secret_env = config.cc_profile(tier)
+            session = HeadlessClaude(
+                sandbox, workdir,
+                env_profile=env_profile, secret_env=secret_env,
+                user=config.HARNESS_USER or "",
+            )
+            worker = CCWorker(
+                lane, chall, channel,
+                id=wid, name=name, location=location or self.default_location,
+                operator=operator, on_candidate=on_candidate,
+                session=session, role=role,
+                decompiler_url=config.CDDC_DECOMPILER_URL,
+                workdir=workdir,
+                halt_on_flag=config.HARNESS_HALT_ON_FLAG,
+                flag_blacklist=config.FLAG_BLACKLIST,
+                checkpoint_every=config.AGENT_CHECKPOINT,
+                # cap only the triage tier (it should be fast); solvers run uncapped.
+                turn_cap_secs=config.CC_TRIAGE_TURN_SECS if tier == "triage" else 0,
             )
         else:
             worker = DummyWorker(

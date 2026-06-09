@@ -49,6 +49,7 @@ from .config import (
     CLAUDE_MAX_TOKENS,
     CLAUDE_MODEL,
     CODEX_MODEL,
+    DEEP_KIND,
     DEEPSEEK_API_KEY,
     DEEPSEEK_BASE_URL,
     DISABLE_HANDOFF,
@@ -60,6 +61,7 @@ from .config import (
     OPENAI_API_KEY,
     OPENAI_BASE_URL,
     SPECIALIST_KIND,
+    SPECIALIST_MODEL,
     STATUS_CHANNEL,
     WORKER_KIND,
     category_for_channel,
@@ -68,6 +70,7 @@ from .dispatcher import Dispatcher
 from .lanes import LANES
 from .models import ClaudeClient, CodexClient, DeepSeekClient
 from .registry import Registry
+from .worker import append_dossier
 
 # .env is loaded by config.py (imported above) before its env reads.
 
@@ -101,10 +104,26 @@ def _build_model():
 
 _model = _build_model() if WORKER_KIND == "agent" else None
 
+# The escalation tier (specialist / deep / race) can run a STRONGER DeepSeek than
+# triage's flash - see brain-cost doctrine. Only meaningful for the deepseek
+# provider with a distinct model; otherwise it reuses the triage model (and the
+# "harness" kind builds its own CLI agent, ignoring this).
+if (
+    _model is not None
+    and AGENT_PROVIDER == "deepseek"
+    and DEEPSEEK_API_KEY
+    and SPECIALIST_MODEL != CHURN_MODEL
+):
+    _specialist_model = DeepSeekClient(
+        DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, SPECIALIST_MODEL, thinking=CHURN_THINKING
+    )
+else:
+    _specialist_model = _model
+
 # Resolve the dispatch kind once. "harness" runs the CLI agents in tmux (no
 # ModelClient); "agent" needs a built model; otherwise dummy.
-if WORKER_KIND == "harness":
-    _KIND = "harness"
+if WORKER_KIND in ("harness", "cc"):
+    _KIND = WORKER_KIND  # CLI-driven (tmux harness, or headless Claude Code) - no ModelClient
 elif _model is not None:
     _KIND = "agent"
 else:
@@ -115,10 +134,22 @@ else:
 # light DeepSeek specialist now; "harness" makes it the Claude Code box agent. In
 # dummy mode there's nothing real to escalate to, so it stays dummy.
 _SPECIALIST_KIND = _KIND if _KIND == "dummy" else SPECIALIST_KIND
+# The DEEP tier brain (what `!escalate deep` respawns): the real top of the ladder,
+# default the Claude Code harness. Stays dummy in dummy mode (nothing real to run).
+_DEEP_KIND = _KIND if _KIND == "dummy" else DEEP_KIND
+# An "agent" tier needs a DeepSeek ModelClient. If we never built one (e.g. WORKER_KIND
+# = cc/harness, which are CLI-driven), an agent specialist/deep would crash on
+# model.chat - so fall back to the triage kind, which needs no ModelClient.
+if _SPECIALIST_KIND == "agent" and _specialist_model is None:
+    _log.warning("specialist kind 'agent' has no model (worker=%s) -> using '%s'", WORKER_KIND, _KIND)
+    _SPECIALIST_KIND = _KIND
+if _DEEP_KIND == "agent" and _specialist_model is None:
+    _DEEP_KIND = _KIND
 
 _log.info(
-    "tiers: triage=%s specialist=%s | provider=%s model=%s sandbox=%s",
-    _KIND, _SPECIALIST_KIND, AGENT_PROVIDER, CHURN_MODEL, CDDC_SANDBOX,
+    "tiers: triage=%s specialist=%s | provider=%s triage_model=%s specialist_model=%s sandbox=%s",
+    _KIND, _SPECIALIST_KIND, AGENT_PROVIDER, CHURN_MODEL,
+    getattr(_specialist_model, "model", "?"), CDDC_SANDBOX,
 )
 if _KIND == "agent" and CDDC_SANDBOX != "docker":
     # run_shell runs on the HOST with no isolation - the model-driven shell can
@@ -480,7 +511,31 @@ async def cmd_resume(ctx: commands.Context, target: str | None = None) -> None:
 @bot.command(name="kill")
 async def cmd_kill(ctx: commands.Context, target: str | None = None) -> None:
     hit = registry.broadcast(ctx.channel.id, lambda w: w.cancel(), target=_clean_target(target))
-    await ctx.send(f"killing {len(hit)} worker(s)" if hit else "no worker here")
+    for w in hit:
+        registry.remove(ctx.channel.id, w)
+    # Drop the shared per-challenge box (#12) only when NO worker remains - killing
+    # one racer by name must not pull the container out from under the others.
+    released = False
+    if not registry.workers(ctx.channel.id):
+        await registry.release_box(ctx.channel.id)
+        released = True
+    if not hit:
+        await ctx.send("no worker here")
+    else:
+        await ctx.send(f"killing {len(hit)} worker(s)" + (" + released the box" if released else ""))
+
+
+@bot.command(name="triage")
+async def cmd_triage(ctx: commands.Context, target: str | None = None) -> None:
+    """Force the agent(s) to STOP and file a triage report (.cddc/triage.md), instead
+    of grinding on a solve. For the cc worker this interrupts the live turn and resumes
+    it with the triage instruction (stop-and-steer)."""
+    from .cc_worker import FORCE_TRIAGE_STEER
+
+    hit = registry.broadcast(
+        ctx.channel.id, lambda w: w.steer(FORCE_TRIAGE_STEER), target=_clean_target(target)
+    )
+    await ctx.send(f"forcing a triage on {len(hit)} worker(s)" if hit else "no worker here")
 
 
 @bot.command(name="lane")
@@ -538,18 +593,24 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
         await ctx.send("usage: !escalate | !escalate deep | !escalate race [n]")
         return
 
-    # Carry triage's read + recent attempts forward as a handoff steer, then
-    # stand the current worker(s) down and respawn specialist(s) on a fresh
-    # Challenge copy (so the cancelled workers can't clobber the new state).
+    # Persist a handoff DOSSIER on the (now persistent) box's workdir so the brain
+    # taking over inherits what was tried - not a blank slate in a warm box (#11).
+    # The steer is just a POINTER to it (small, safe over the harness's send-keys);
+    # the agent path also reads the file directly on start.
     old = workers[0]
     ch = old.chall
+    workdir = os.path.abspath(os.path.join(DOWNLOAD_DIR, str(ch.thread_id)))
+    dossier_path = append_dossier(workdir, old.dossier_text())
     handoff = (
-        f"[triage handoff] {ch.gist or ''} "
-        f"difficulty {ch.difficulty}/5, technique: {ch.technique or '?'}. "
-        f"blockers: {ch.escalation_reason or '-'} "
-        f"(triage recommended: {ch.recommendation or '?'}). "
-        f"triage tried: {', '.join(old.tried[-6:]) or '-'}"
+        f"[handoff] You are taking over a LIVE box a prior {getattr(old, 'role', 'worker')} "
+        f"used - its tools, services, and scratch files are still here. Read the full "
+        f"dossier at {dossier_path} FIRST, then build on it (don't redo its steps). "
+        f"Quick read: difficulty {ch.difficulty}/5, technique {ch.technique or '?'}, "
+        f"recommended {ch.recommendation or '?'}."
     )
+    # The ladder is REAL: `!escalate deep` swaps the BRAIN to the deep tier (the
+    # Claude Code box by default), not just the lane; `!escalate` / `race` = specialist.
+    esc_kind = _DEEP_KIND if mode == "deep" else _SPECIALIST_KIND
     channel = ch.channel
     for w in workers:
         w.cancel()
@@ -562,9 +623,7 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
             new_chall, channel,
             lane_override=lane_override,
             on_candidate=_candidate_hook,
-            # the SPECIALIST tier, not the triage kind: a deeper agent now, or the
-            # Claude Code box harness when CDDC_SPECIALIST_KIND=harness.
-            kind=_SPECIALIST_KIND, model=_model, cli=HARNESS_CLI, summarizer=_summarizer,
+            kind=esc_kind, model=_specialist_model, cli=HARNESS_CLI, summarizer=_summarizer,
             role_override="specialist",
             budget_mult=ESCALATION_BUDGET_MULT,
         )
@@ -573,14 +632,15 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
             worker.race_now()
         spawned.append(worker.name)
 
-    label = (
-        "deep_solver" if lane_override
-        else f"{n}-way race" if n > 1
-        else "specialist"
-    )
+    if mode == "deep":
+        label = "deep (Claude Code box)" if esc_kind == "harness" else f"deep ({esc_kind})"
+    elif n > 1:
+        label = f"{n}-way race"
+    else:
+        label = "specialist"
     await ctx.send(
         f"escalated -> **{label}**: {', '.join(spawned)} "
-        f"(handed off: difficulty {ch.difficulty}/5, {ch.technique or '?'})"
+        f"(handed off via dossier: difficulty {ch.difficulty}/5, {ch.technique or '?'})"
     )
 
 
@@ -644,6 +704,8 @@ async def cmd_solved(ctx: commands.Context) -> None:
         return
     for w in workers:
         w.mark_solved()
+        registry.remove(ctx.channel.id, w)
+    await registry.release_box(ctx.channel.id)  # challenge done -> destroy the box (#12)
     if isinstance(ctx.channel, discord.Thread) and not ctx.channel.name.startswith("[SOLVED]"):
         await ctx.channel.edit(name=f"[SOLVED] {ctx.channel.name}"[:100])
     await ctx.send(f"confirmed solved - {len(workers)} agent(s) standing down")
