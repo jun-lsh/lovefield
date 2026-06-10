@@ -84,6 +84,14 @@ if [ "${CDDC_SOCKET:-0}" = "1" ]; then
   fi
 fi
 
+# raw exploit box: gdb (SYS_PTRACE), crash cores, default seccomp/apparmor lifted so
+# pwn challenges can use io_uring etc. CDDC_PRIVILEGED=1 for kernel/device challenges.
+if [ "${CDDC_PRIVILEGED:-0}" = "1" ]; then
+  SECOPT="--privileged --ulimit core=-1"
+else
+  SECOPT="--cap-add SYS_PTRACE --ulimit core=-1 --security-opt seccomp=unconfined --security-opt apparmor=unconfined"
+fi
+
 # --- backend env: claude on DeepSeek (optional) -----------------------------
 # Secret rides in the spawn env (inherited -e, off the argv); non-secret on argv.
 ENVARGS=""
@@ -105,7 +113,7 @@ fi
 # --- launch the box (sleeps; we exec the CLI into it) -----------------------
 docker rm -f "$BOX" >/dev/null 2>&1 || true
 # shellcheck disable=SC2086
-docker run -d --name "$BOX" $NETARG $MOUNTS $SOCKARG "$IMAGE" sleep infinity >/dev/null
+docker run -d --name "$BOX" $NETARG $MOUNTS $SOCKARG $SECOPT "$IMAGE" sleep infinity >/dev/null
 
 cleanup() {
   if [ "${KEEP:-0}" = "1" ]; then

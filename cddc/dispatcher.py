@@ -69,6 +69,8 @@ class Dispatcher:
             gpu=config.CDDC_SANDBOX_GPU,
             network=config.CDDC_SANDBOX_NETWORK,
             decompiler_url=config.CDDC_DECOMPILER_URL,
+            seccomp=config.CDDC_SANDBOX_SECCOMP,
+            privileged=config.CDDC_SANDBOX_PRIVILEGED,
         )
 
     def pick_lane(self, chall: Challenge, *, override: str | None = None) -> Lane:

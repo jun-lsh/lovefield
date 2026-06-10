@@ -264,6 +264,15 @@ TRIAGE_SOCKET = _envs("CDDC_TRIAGE_SOCKET", "0").lower() in ("1", "true", "yes")
 # torch can use it. Needs the NVIDIA driver + nvidia-container-toolkit on the host;
 # off by default (most hosts have no GPU, and the flag errors without the toolkit).
 CDDC_SANDBOX_GPU = _envs("CDDC_SANDBOX_GPU", "0").lower() in ("1", "true", "yes")
+# Seccomp profile for the per-challenge box. CTF pwn challenges legitimately use
+# syscalls Docker's DEFAULT seccomp blocks (io_uring 425-427 -> EPERM, etc.), so the
+# exploit can't run in the box. Default "unconfined" lifts the filter (these are
+# throwaway, already-socket-armed boxes - re-confine with "default" if you must).
+CDDC_SANDBOX_SECCOMP = _envs("CDDC_SANDBOX_SECCOMP", "unconfined")
+# Full --privileged box (all caps + host devices) for KERNEL / device pwn. Off by
+# default - the seccomp-unconfined + SYS_PTRACE + core-dump set covers userland pwn;
+# flip on only for challenges that need raw kernel/device access.
+CDDC_SANDBOX_PRIVILEGED = _envs("CDDC_SANDBOX_PRIVILEGED", "0").lower() in ("1", "true", "yes")
 # Shared decompiler service (pyghidra-mcp). Agents reach it over a docker network:
 # set CDDC_SANDBOX_NETWORK to the network the `cddc-decompiler` container is on, and
 # the sandbox joins it + gets CDDC_DECOMPILER_URL so the agent's decompiler MCP finds it.

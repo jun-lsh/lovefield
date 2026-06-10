@@ -48,11 +48,22 @@ class Sandbox:
         gpu: bool = False,
         network: str = "",
         decompiler_url: str = "",
+        seccomp: str = "unconfined",
+        privileged: bool = False,
     ) -> None:
         self.image = image
         self.thread_id = thread_id
         self.host_workdir = host_workdir
         self.mount = mount
+        # Seccomp profile for the box. CTF exploit boxes need RAW syscalls: Docker's
+        # default profile blocks io_uring (425-427) + others that pwn challenges
+        # legitimately use, returning EPERM. "unconfined" lifts the filter; set
+        # "default" (or "") to keep Docker's. (A socket-armed box is already privileged,
+        # and it's a throwaway per-challenge container, so unconfined is the right CTF default.)
+        self.seccomp = (seccomp or "").strip()
+        # Full --privileged (all caps + host devices) for kernel/device challenges. Off
+        # by default; the seccomp/cap/ulimit set covers userland pwn.
+        self.privileged = bool(privileged)
         # SELinux relabel flag for the workdir bind-mount ("z"/"Z"); empty = none.
         # Needed only on SELinux-enforcing hosts; a no-op (and a footgun) elsewhere.
         self.mount_flag = (mount_flag or "").strip().lstrip(":")
@@ -153,6 +164,17 @@ class Sandbox:
             ]
         gpu_args = ["--gpus", "all"] if self.gpu else []
         net_args = ["--network", self.network] if self.network else []
+        # CTF exploit boxes need raw access: gdb (SYS_PTRACE), crash cores (ulimit), the
+        # default seccomp lifted (io_uring etc.), and AppArmor out of the way.
+        if self.privileged:
+            # kernel / device challenges: the big hammer (all caps + devices). No more
+            # than the mounted host socket already grants; implies seccomp/apparmor off.
+            sec_args: list[str] = ["--privileged", "--ulimit", "core=-1"]
+        else:
+            sec_args = ["--cap-add", "SYS_PTRACE", "--ulimit", "core=-1"]
+            if self.seccomp and self.seccomp.lower() not in ("default", "docker"):
+                sec_args = ["--security-opt", f"seccomp={self.seccomp}",
+                            "--security-opt", "apparmor=unconfined", *sec_args]
         # No --rm: the box is a persistent per-challenge resource (#12). It must
         # survive an accidental stop / daemon blip so start() can restart it and
         # recover state; it's removed only by release() at challenge end.
@@ -165,6 +187,7 @@ class Sandbox:
             *sock_args,
             *gpu_args,
             *net_args,
+            *sec_args,
             self.image,
             "sleep", "infinity",
         ]
