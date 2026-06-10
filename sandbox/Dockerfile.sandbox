@@ -60,8 +60,17 @@ RUN arch="$(uname -m)" \
     && curl -fsSL "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${arch}" \
         -o /usr/local/lib/docker/cli-plugins/docker-compose \
     && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose \
+    # buildx (BuildKit) - `docker build` REQUIRES it on modern Docker; without it the
+    # legacy builder is deprecated/broken and `docker build` exits 1 (agents then
+    # misread it as a perms problem). buildx releases use amd64/arm64 naming, not uname -m.
+    && case "$arch" in x86_64) bxa=amd64 ;; aarch64) bxa=arm64 ;; *) bxa="$arch" ;; esac \
+    && bxurl=$(curl -fsSL https://api.github.com/repos/docker/buildx/releases/latest \
+        | jq -r --arg a "linux-${bxa}" '.assets[] | select(.name | endswith($a)) | .browser_download_url' | head -1) \
+    && curl -fsSL "$bxurl" -o /usr/local/lib/docker/cli-plugins/docker-buildx \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-buildx \
     && docker --version \
-    && docker compose version
+    && docker compose version \
+    && docker buildx version
 
 # Shadow `docker` with a shim that auto-labels manual `docker run`/`create` with
 # cddc.thread=$CDDC_THREAD, so the host can reap per-challenge siblings even when
@@ -116,6 +125,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         nodejs \
         npm \
+        sudo \
     && rm -rf /var/lib/apt/lists/*
 
 # The harness worker (cddc/harness_worker.py) drives these CLIs in a tmux session
@@ -130,7 +140,13 @@ RUN npm install -g @openai/codex \
 # runtime (usermod -o), so it can read the 0600 host credentials we bind-mount and
 # write the bind-mounted challenge dir - no matter what uid this image was built
 # with (the base image's default `ubuntu` user squats on 1000).
-RUN useradd -m -s /bin/bash ctf
+# NOPASSWD sudo for ctf: the agent runs as this non-root user, so without sudo it
+# can't `apt-get install` a missing tool (pip/uv/gem work user-level, apt needs root).
+# No real escalation - a socket-armed box already has host root via the daemon, and a
+# throwaway per-challenge container with root-in-box is fine.
+RUN useradd -m -s /bin/bash ctf \
+    && echo 'ctf ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ctf \
+    && chmod 0440 /etc/sudoers.d/ctf
 
 # Install Claude Code via its NATIVE installer (into ~/.local/bin/claude), NOT the
 # npm package. The npm `@anthropic-ai/claude-code` is only a launcher that expects

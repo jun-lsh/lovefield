@@ -1,0 +1,5 @@
+# Shell scripts run in WSL and inside Linux containers - they MUST stay LF, or bash
+# chokes on the \r ("set: -", "$'\r': command not found", "unexpected end of file").
+# This overrides a Windows git's core.autocrlf and editor format-on-save.
+*.sh            text eol=lf
+sandbox/cddc-docker-shim text eol=lf

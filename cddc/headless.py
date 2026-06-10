@@ -250,7 +250,13 @@ class HeadlessClaude:
         if self.user and hasattr(os, "getuid"):
             uid, gid = os.getuid(), os.getgid()  # type: ignore[attr-defined]
             home = container_home(self.user)
+            # Docker-out-of-docker: the bound host socket is root:root 0660, so the
+            # non-root agent user can't reach it -> chmod it world-usable. (Loosens the
+            # host socket's perms; fine for a single-user solve box.)
+            sock = getattr(self.sandbox, "docker_sock", "") or ""
+            sock_fix = f"chmod 0666 {sock} 2>/dev/null; " if sock else ""
             await self.sandbox.exec(
+                sock_fix +
                 f"groupmod -o -g {gid} {self.user} 2>/dev/null; "
                 f"usermod -o -u {uid} -g {self.user} {self.user} 2>/dev/null; "
                 f"chown {uid}:{gid} {home} 2>/dev/null; "

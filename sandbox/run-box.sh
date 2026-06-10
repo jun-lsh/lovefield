@@ -72,6 +72,18 @@ if [ -n "$NET" ] && [ -n "$FILES_ABS" ]; then
   MOUNTS="$MOUNTS -v $FILES_ABS:/files:ro"
 fi
 
+# docker-out-of-docker: bind the host daemon socket so the agent can build/run sibling
+# containers. Opt in with CDDC_SOCKET=1 (it's host-root). We chmod it usable below.
+SOCKARG=""
+DSOCK="${CDDC_DOCKER_SOCK:-/var/run/docker.sock}"
+if [ "${CDDC_SOCKET:-0}" = "1" ]; then
+  if [ -S "$DSOCK" ]; then
+    SOCKARG="-v $DSOCK:$DSOCK -e COMPOSE_PROJECT_NAME=$BOX -e CDDC_THREAD=$BOX"
+  else
+    echo "warn: CDDC_SOCKET=1 but $DSOCK is not a socket - skipping the docker socket"
+  fi
+fi
+
 # --- backend env: claude on DeepSeek (optional) -----------------------------
 # Secret rides in the spawn env (inherited -e, off the argv); non-secret on argv.
 ENVARGS=""
@@ -93,7 +105,7 @@ fi
 # --- launch the box (sleeps; we exec the CLI into it) -----------------------
 docker rm -f "$BOX" >/dev/null 2>&1 || true
 # shellcheck disable=SC2086
-docker run -d --name "$BOX" $NETARG $MOUNTS "$IMAGE" sleep infinity >/dev/null
+docker run -d --name "$BOX" $NETARG $MOUNTS $SOCKARG "$IMAGE" sleep infinity >/dev/null
 
 cleanup() {
   if [ "${KEEP:-0}" = "1" ]; then
@@ -117,6 +129,9 @@ docker exec -w / "$BOX" sh -c "
   chown $(id -u):$(id -g) $HOME_C 2>/dev/null
   chown -R $(id -u):$(id -g) $HOME_C/.local $HOME_C/.cache $HOME_C/.npm $HOME_C/.claude $HOME_C/.codex 2>/dev/null
   true" || true
+
+# make the bound docker socket usable by the non-root agent user (docker-out-of-docker)
+[ -n "$SOCKARG" ] && docker exec -w / "$BOX" chmod 0666 "$DSOCK" >/dev/null 2>&1 || true
 
 # Wire the shared decompiler MCP for claude (if a docker network is configured).
 if [ "$AGENT" = "claude" ] && [ -n "$NET" ]; then

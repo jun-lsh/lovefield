@@ -37,6 +37,10 @@ python3
 Lane-specific packages and libraries are listed under their respective
 `cddc/skills/lanes/*/SKILL.md` files.
 
+**Need a tool that isn't here? INSTALL it** - don't get stuck: `pip install <x>` /
+`uv pip install --system <x>`, `gem install <x>`, or (you have passwordless sudo)
+`sudo apt-get update && sudo apt-get install -y <pkg>`.
+
 - **stego / media:** steghide, stegseek (passphrase cracker), zsteg, binwalk,
   foremost, exiftool, zbarimg, tesseract, imagemagick, ffmpeg, sox, stegolsb.
 - **pwn:** pwntools, gef (bata24 fork, auto-loaded in gdb), pwninit,

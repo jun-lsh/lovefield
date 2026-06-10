@@ -1,4 +1,3 @@
-#!/usr/bin/env sh
 # Bring up the shared pyghidra-mcp decompiler service for the fleet.
 #
 # Run from the repo root, in the SAME environment as the bot, so the /files mount
