@@ -113,6 +113,7 @@ class Dispatcher:
         role_override: str | None = None,
         budget_mult: float = 1.0,
         docker_sock: str | None = None,
+        model_override: str = "",
     ) -> Worker:
         """Build a worker for the challenge, register it, and start its loop.
 
@@ -243,6 +244,8 @@ class Dispatcher:
             )
             tier = config.cc_tier_for(role, lane.name)
             env_profile, secret_env = config.cc_profile(tier)
+            if model_override:  # e.g. !escalate deep 4.6 pins the deep tier's Opus version
+                env_profile = {**env_profile, "ANTHROPIC_MODEL": model_override}
             session = HeadlessClaude(
                 sandbox, workdir,
                 env_profile=env_profile, secret_env=secret_env,

@@ -20,6 +20,7 @@ import logging
 import os
 import pathlib
 import re
+from urllib.parse import urlparse
 
 import discord
 from discord.ext import commands
@@ -55,6 +56,7 @@ from .config import (
     DISABLE_HANDOFF,
     DOWNLOAD_DIR,
     ESCALATION_BUDGET_MULT,
+    FETCH_MAX_MB,
     HARNESS_CLI,
     HARNESS_SUMMARIZE,
     IGNORE_CHANNELS,
@@ -560,14 +562,27 @@ async def cmd_lane(ctx: commands.Context, name: str = "") -> None:
     await ctx.send(f"rerouted to lane `{name}` - {worker.name}")
 
 
+def _deep_model_for(sel: str) -> str:
+    """Map a `!escalate deep <sel>` model selector to a model id, or "" for the plan
+    default. Lets you fall back to Opus 4.6 if 4.8 refuses on cyber-capability grounds
+    mid-analysis: `!escalate deep 4.6`. A raw `claude-...` id is passed through."""
+    s = (sel or "").lower().lstrip("v")
+    if s in ("4.6", "46", "opus-4-6", "opus4.6", "opus-4.6"):
+        return "claude-opus-4-6"
+    if s in ("4.8", "48", "opus-4-8", "opus4.8", "opus-4.8"):
+        return "claude-opus-4-8"
+    return sel if s.startswith("claude") else ""
+
+
 @bot.command(name="escalate")
 async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
     """Approve a pending escalation: stand the triage agent down and respawn a
     specialist (deeper budget), seeded with triage's handoff.
 
-      !escalate            - specialist on the SAME lane
-      !escalate deep       - hand it to the deep_solver lane
-      !escalate race [n]   - fan out N specialists on the same lane (default 3)
+      !escalate              - specialist on the SAME lane
+      !escalate deep [4.6|4.8] - deep_solver lane (Claude/Opus); pick the Opus version
+                                 (4.6 fallback if 4.8 refuses on cyber grounds)
+      !escalate race [n]     - fan out N specialists on the same lane (default 3)
     """
     workers = registry.workers(ctx.channel.id)
     if not workers:
@@ -583,14 +598,16 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
     parts = arg.split()
     mode = parts[0].lower() if parts else ""
     lane_override: str | None = None
+    deep_model = ""
     n = 1
     if mode == "deep":
         lane_override = "deep_solver"
+        deep_model = _deep_model_for(parts[1] if len(parts) > 1 else "")
     elif mode == "race":
         n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3
         n = max(2, min(n, 5))
     elif mode:
-        await ctx.send("usage: !escalate | !escalate deep | !escalate race [n]")
+        await ctx.send("usage: !escalate | !escalate deep [4.6|4.8] | !escalate race [n]")
         return
 
     # Persist a handoff DOSSIER on the (now persistent) box's workdir so the brain
@@ -626,6 +643,7 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
             kind=esc_kind, model=_specialist_model, cli=HARNESS_CLI, summarizer=_summarizer,
             role_override="specialist",
             budget_mult=ESCALATION_BUDGET_MULT,
+            model_override=deep_model,  # !escalate deep 4.6|4.8 pins the cc deep tier's Opus
         )
         worker.steer(handoff)
         if n > 1:
@@ -633,7 +651,7 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
         spawned.append(worker.name)
 
     if mode == "deep":
-        label = "deep (Claude Code box)" if esc_kind == "harness" else f"deep ({esc_kind})"
+        label = f"deep (Claude, {deep_model or 'plan default'})" if esc_kind == "cc" else f"deep ({esc_kind})"
     elif n > 1:
         label = f"{n}-way race"
     else:
@@ -642,6 +660,66 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
         f"escalated -> **{label}**: {', '.join(spawned)} "
         f"(handed off via dossier: difficulty {ch.difficulty}/5, {ch.technique or '?'})"
     )
+
+
+def _normalize_fetch_url(url: str) -> str:
+    """Make a host's share URL a DIRECT download for the couple that aren't already."""
+    if "tmpfiles.org/" in url and "/dl/" not in url:
+        return url.replace("tmpfiles.org/", "tmpfiles.org/dl/", 1)
+    if "bashupload.com/" in url and "download=1" not in url:
+        return url + ("&" if "?" in url else "?") + "download=1"
+    return url
+
+
+async def _download_to(url: str, dest: str, *, max_mb: int) -> int:
+    """Stream a URL to `dest` (never buffers the whole file). Returns bytes written;
+    raises on HTTP error or if it exceeds max_mb."""
+    import httpx
+
+    cap = max_mb * 1024 * 1024
+    total = 0
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    async with httpx.AsyncClient(follow_redirects=True,
+                                 timeout=httpx.Timeout(1800.0, connect=30.0)) as c:
+        async with c.stream("GET", url) as r:
+            r.raise_for_status()
+            with open(dest, "wb") as f:
+                async for chunk in r.aiter_bytes(262144):
+                    total += len(chunk)
+                    if total > cap:
+                        raise ValueError(f"exceeds {max_mb} MB cap (raise CDDC_FETCH_MAX_MB)")
+                    f.write(chunk)
+    return total
+
+
+@bot.command(name="fetch")
+async def cmd_fetch(ctx: commands.Context, url: str = "", *, name: str = "") -> None:
+    """Pull a BIG challenge file from a URL into this thread's /challenge - for files
+    too large for a Discord attachment. Upload it to a host first, then paste the URL:
+
+      !fetch <direct-download-url> [filename]
+
+    Anonymous hosts that give a direct curl-able URL (2026): litterbox.catbox.moe
+    (<=1GB, 72h), temp.sh (<=4GB, 3d), x0.at (<=1GB, longer). `sh sandbox/share.sh
+    <file>` uploads + prints the URL. (0x0.st / transfer.sh are dead.)"""
+    if not url.startswith(("http://", "https://")):
+        await ctx.send("usage: `!fetch <direct-download-url> [filename]` - upload to "
+                       "litterbox/temp.sh/x0.at first (or `sh sandbox/share.sh <file>`), then paste the URL")
+        return
+    url = _normalize_fetch_url(url.strip())
+    thread_id = ctx.channel.id
+    workdir = os.path.abspath(os.path.join(DOWNLOAD_DIR, str(thread_id)))
+    fname = (name.strip() or os.path.basename(urlparse(url).path) or "download.bin").split("?")[0]
+    dest = os.path.join(workdir, fname)
+    await ctx.send(f"fetching `{fname}` ... (large files take a moment)")
+    try:
+        size = await _download_to(url, dest, max_mb=FETCH_MAX_MB)
+    except Exception as e:
+        await ctx.send(f"fetch failed: {type(e).__name__}: {e}")
+        return
+    await ctx.send(f"saved `{fname}` ({size / 1024 / 1024:.1f} MB) -> /challenge")
+    # nudge any running worker on this thread so it picks the file up
+    registry.broadcast(thread_id, lambda w: w.steer(f"operator placed a new file in /challenge: {fname}"))
 
 
 @bot.command(name="start", aliases=["dispatch"])

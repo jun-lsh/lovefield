@@ -64,6 +64,9 @@ DEFAULT_LANE = "raw"
 # without this it makes a literal `~` directory) - and a WSL-native home path
 # bind-mounts into docker far more cleanly than a /mnt/c path.
 DOWNLOAD_DIR = os.path.expanduser(os.environ.get("CDDC_FILES_DIR", "_files"))
+# Max size (MB) `!fetch <url>` will stream into a challenge workdir - for big files
+# (memory dumps, disk images) that exceed Discord's upload limit. Generous by default.
+FETCH_MAX_MB = int(os.environ.get("CDDC_FETCH_MAX_MB", "8192"))
 
 # Seconds the dummy worker waits between scripted steps on the live bot. Slow
 # enough to catch a run mid-flight and !steer / !status / !kill / !lane it.
@@ -124,6 +127,10 @@ SPECIALIST_MODEL = _envs("CDDC_SPECIALIST_MODEL", "deepseek-v4-pro")
 CC_DEEPSEEK_ANTHROPIC_URL = _envs("CDDC_CC_DEEPSEEK_URL", "https://api.deepseek.com/anthropic")
 CC_FLASH_MODEL = _envs("CDDC_CC_FLASH_MODEL", "deepseek-v4-flash")  # triage tier
 CC_PRO_MODEL = _envs("CDDC_CC_PRO_MODEL", "deepseek-v4-pro")        # specialist tier
+# Deep tier (Opus on the subscription). "" = the plan's default Opus; pin a specific
+# version here, or per-escalation with `!escalate deep 4.6|4.8` (e.g. fall back to 4.6
+# if 4.8 refuses on cyber-capability grounds mid-analysis).
+CC_DEEP_MODEL = _envs("CDDC_CC_DEEP_MODEL", "")
 # Backstop wall-clock cap (seconds) on a single TRIAGE turn: a flash turn that ignores
 # "assess, don't grind" still stops and halts for the operator. 0 = no cap. Solver
 # tiers (specialist/deep) run uncapped - the operator controls them via !steer/!kill.
@@ -150,7 +157,9 @@ def cc_profile(tier: str) -> tuple[dict, dict]:
     DeepSeek's endpoint - DeepSeek billing only.
     """
     if tier == "deep":
-        return {}, {}  # no anthropic env -> mounted subscription -> Opus 4.8 (no API burn)
+        # No anthropic AUTH env -> mounted subscription -> Opus (no API burn). Optionally
+        # PIN the model (still subscription auth); empty = the plan's default Opus.
+        return ({"ANTHROPIC_MODEL": CC_DEEP_MODEL} if CC_DEEP_MODEL else {}), {}
     model = CC_PRO_MODEL if tier == "specialist" else CC_FLASH_MODEL
     env = {
         "ANTHROPIC_BASE_URL": CC_DEEPSEEK_ANTHROPIC_URL,
