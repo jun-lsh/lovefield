@@ -20,7 +20,7 @@ ntfs-3g
 
 **Python Libraries**
 ```
-volatility3
+volatility3   (run it as the `vol` command, NOT `volatility3`)
 ```
 
 **Installed Tool Repos / Binaries**

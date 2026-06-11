@@ -4,7 +4,7 @@ SWAPPABLE SNIPPET - facts about the box you are on RIGHT NOW, not doctrine. Upda
 this when the toolchain changes; do not bake it into the role/lane prompts.
 
 - Your `run_shell` runs inside the **ctf-sandbox Linux container** - a FULL CTF
-  toolchain (r2, Ghidra, pwntools, sage, volatility3, ...), NOT a bare host.
+  toolchain (r2, Ghidra, pwntools, sage, volatility (`vol`), ...), NOT a bare host.
   **NEVER state a tool is missing without running `command -v <tool>` first.**
   Assuming "probably no decompiler here" and escalating on that basis is a triage
   ERROR - the tool is almost certainly installed. Only if `command -v` actually
@@ -55,7 +55,7 @@ Lane-specific packages and libraries are listed under their respective
   Ghidra directly. (`ghidra-rpc` and the old `dc` client are gone.) Also: jadx (Android),
   ilspycmd (.NET), pycdc (python bytecode), frida, qiling, lief, pefile. Rust: `oxidizer`
   runs as a sidecar container via the docker socket.
-- **forens:** tshark (pcap), volatility3 (memory dumps), sleuthkit (disk images).
+- **forens:** tshark (pcap), volatility (`vol`, memory dumps), sleuthkit (disk images).
   Eric Zimmerman `MFTECmd`/`EvtxECmd`/`RECmd` are baked; pull MORE net9 EZ tools on
   demand (the how-to is in `/opt/cddc-forens.txt`). Light stego/media tools
   (steghide, zsteg, binwalk, exiftool, zbarimg...) are in the stego set above.

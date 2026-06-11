@@ -519,12 +519,28 @@ async def scenario_docker_socket_gating() -> None:
         )
         assert forced.sandbox is not triage.sandbox, "a different challenge must get its own box"
         assert forced.sandbox.docker_sock is None, "explicit docker_sock='' should force the socket off"
-        # release_box destroys + forgets the box (challenge end: !kill / !solved).
+        # RACE (#9): each racer (instance="-r<i>") gets its OWN isolated box + workdir,
+        # NOT the shared challenge box - else N agents clobber each other in one container.
+        rch = Challenge(id="dk1", name="svc", category="web", thread_id=7001)
+        r1 = await disp.dispatch(rch, ConsoleChannel("web", echo=False), kind="agent",
+                                 model=FakeModel([]), autostart=False,
+                                 role_override="specialist", instance="-r1")
+        r2 = await disp.dispatch(rch, ConsoleChannel("web", echo=False), kind="agent",
+                                 model=FakeModel([]), autostart=False,
+                                 role_override="specialist", instance="-r2")
+        assert r1.sandbox is not r2.sandbox and r1.sandbox is not triage.sandbox, \
+            "racers must get ISOLATED boxes, not share the challenge box"
+        assert r1.sandbox.name == "cddc-7001-r1" and r2.sandbox.name == "cddc-7001-r2", \
+            f"racer boxes need distinct names ({r1.sandbox.name} / {r2.sandbox.name})"
+        assert len({triage.sandbox.host_workdir, r1.sandbox.host_workdir,
+                    r2.sandbox.host_workdir}) == 3, "racers need isolated workdirs"
+        # release_box reaps the shared box AND all race instances for the thread.
         await reg.release_box(7001)
-        assert 7001 not in reg.boxes, "release_box should forget the challenge's box"
+        assert not [k for k in reg.boxes if k == "7001" or k.startswith("7001-r")], \
+            "release_box should reap the shared box AND every race instance"
     finally:
         config.CDDC_SANDBOX = saved_sb
-    ok("shared box: socket uniform, escalation reuses the live box, release_box reaps it")
+    ok("shared box reused on escalation; race gets ISOLATED per-racer boxes; release reaps all")
 
 
 # --- scenario 6b2: handoff dossier (state continuity across takeover) -----

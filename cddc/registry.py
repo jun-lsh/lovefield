@@ -12,6 +12,7 @@ no retrofit.
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
@@ -24,30 +25,40 @@ if TYPE_CHECKING:
 class Registry:
     def __init__(self) -> None:
         self.active: dict[int, list[Worker]] = {}
-        # The ONE shared sandbox box per challenge (task #12). It outlives the
-        # individual workers: created on first use, reused by every worker on the
-        # thread (escalation / race / lane reroute), released only at challenge end.
-        self.boxes: dict[int, "Sandbox"] = {}
+        # Boxes keyed by SCOPE string. Normally "<thread_id>" - the one shared box per
+        # challenge (task #12), reused by escalation / lane reroute. A race fan-out adds
+        # ISOLATED per-racer boxes keyed "<thread_id>-r<i>" so the racers don't clobber
+        # each other. All a thread's boxes are released together at challenge end.
+        self.boxes: dict[str, "Sandbox"] = {}
 
-    def get_box(self, thread_id: int, factory: Callable[[], "Sandbox"]) -> "Sandbox":
-        """Return the challenge's shared box, creating it (via `factory`) on first
-        use. Every worker on the thread gets the SAME object, so a handoff reuses
-        the live container instead of recreating it. Synchronous and free of any
-        await between the check and the store, so concurrent dispatch (a race
-        fan-out) can't make two boxes. The container itself is launched lazily by
-        the worker's start() (idempotent), not here."""
-        box = self.boxes.get(thread_id)
+    def get_box(self, scope, factory: Callable[[], "Sandbox"]) -> "Sandbox":
+        """Return the box for `scope` (str: "<thread>" shared, or "<thread>-r<i>" for a
+        racer), creating it (via `factory`) on first use. Workers sharing a scope get the
+        SAME object, so a handoff reuses the live container. Synchronous and free of any
+        await between check and store, so concurrent dispatch can't make two boxes. The
+        container is launched lazily by the worker's start() (idempotent), not here."""
+        key = str(scope)
+        box = self.boxes.get(key)
         if box is None:
             box = factory()
-            self.boxes[thread_id] = box
+            self.boxes[key] = box
         return box
 
     async def release_box(self, thread_id: int) -> None:
-        """Destroy and forget the challenge's box (challenge end: !kill / !solved).
-        Best-effort; a no-op if there was never a box for the thread."""
-        box = self.boxes.pop(thread_id, None)
-        if box is not None:
+        """Destroy and forget ALL of the challenge's boxes (challenge end: !kill /
+        !solved): the shared box AND any race instances. Reclaims racer workdir copies.
+        Best-effort; a no-op if the thread never had a box."""
+        prefix = f"{thread_id}-r"
+        keys = [k for k in self.boxes if k == str(thread_id) or k.startswith(prefix)]
+        for k in keys:
+            box = self.boxes.pop(k, None)
+            if box is None:
+                continue
             await box.release()
+            if "-r" in k:  # racer boxes own a throwaway workdir COPY - reclaim it
+                wd = getattr(box, "host_workdir", "")
+                if wd:
+                    shutil.rmtree(wd, ignore_errors=True)
 
     def add(self, thread_id: int, worker: Worker) -> None:
         self.active.setdefault(thread_id, []).append(worker)

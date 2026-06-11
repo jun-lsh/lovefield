@@ -28,7 +28,35 @@ class Dispatcher:
         self.default_location = default_location
         self._n = 0  # monotonic worker counter -> ids/names
 
-    def _build_box(self, chall: Challenge, lane: Lane, *, docker_sock: str | None):
+    @staticmethod
+    def _seed_racer_workdir(base: str, dest: str) -> None:
+        """Give a race racer its OWN /challenge: copy the challenge files (+ the dossier)
+        from the shared workdir into the racer's, so racers don't clobber each other's
+        scratch. Skips the bot-written artifacts and never pre-seeds a flag. Best-effort
+        (the box still binds the dir even if this no-ops, e.g. in the sim with no files)."""
+        import shutil
+
+        skip = {".cddc_solution", ".mcp.json", "CLAUDE.md"}
+        try:
+            if not os.path.isdir(base) or os.path.isdir(dest):
+                # dest already seeded (idempotent: a retried/reused racer) -> leave it
+                if not os.path.isdir(base):
+                    os.makedirs(dest, exist_ok=True)
+                return
+            os.makedirs(dest, exist_ok=True)
+            for entry in os.listdir(base):
+                if entry in skip:
+                    continue
+                src = os.path.join(base, entry)
+                dst = os.path.join(dest, entry)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dst)
+        except OSError:
+            pass
+
+    def _build_box(self, chall: Challenge, lane: Lane, *, docker_sock: str | None, instance: str = ""):
         """Construct the per-challenge box with the UNIFORM superset of privileges.
 
         The box is SHARED by every tier on the challenge and created ONCE (task #12),
@@ -47,7 +75,10 @@ class Dispatcher:
         from .harness import credential_mounts  # pure-stdlib helper; libtmux is lazy
         from .sandbox import Sandbox
 
-        workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
+        # `instance` ("-r<i>") = a race racer: its own container + workdir COPY at /challenge.
+        # The decompiler mirror keeps the ORIGINAL files at the shared /files/<thread> path.
+        base_workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
+        workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, f"{chall.thread_id}{instance}"))
         sock = docker_sock if docker_sock is not None else config.DOCKER_SOCK
         mounts = credential_mounts(config.HARNESS_USER) if config.HARNESS_SHARE_CREDS else []
         # Mount the skills library read-only so the cc agents (which DON'T get the
@@ -61,7 +92,7 @@ class Dispatcher:
         # (the MCP is a separate container reading the shared CDDC_FILES_DIR at /files).
         # Without this the agent guesses /tmp/.. or /challenge/.. which the MCP can't see.
         if config.CDDC_SANDBOX_NETWORK and config.CDDC_DECOMPILER_URL:
-            mounts = [*mounts, f"{workdir}:/files/{chall.thread_id}:ro"]
+            mounts = [*mounts, f"{base_workdir}:/files/{chall.thread_id}:ro"]
         return Sandbox(
             config.sandbox_image_for_lane(lane.name), chall.thread_id, workdir,
             extra_mounts=mounts, docker_sock=(sock or None),
@@ -71,6 +102,7 @@ class Dispatcher:
             decompiler_url=config.CDDC_DECOMPILER_URL,
             seccomp=config.CDDC_SANDBOX_SECCOMP,
             privileged=config.CDDC_SANDBOX_PRIVILEGED,
+            instance=instance,
         )
 
     def pick_lane(self, chall: Challenge, *, override: str | None = None) -> Lane:
@@ -114,6 +146,8 @@ class Dispatcher:
         budget_mult: float = 1.0,
         docker_sock: str | None = None,
         model_override: str = "",
+        tier_override: str = "",
+        instance: str = "",
     ) -> Worker:
         """Build a worker for the challenge, register it, and start its loop.
 
@@ -132,10 +166,21 @@ class Dispatcher:
         wid = f"w{self._n}"
         name = f"{lane.name}-{self._n}"
 
+        # Box/workdir SCOPE: "<thread>" shares the one challenge box; a race racer
+        # ("<thread>-r<i>") gets an ISOLATED box + its OWN workdir copy of the challenge
+        # files so racers don't clobber each other (the decompiler still reads the shared
+        # originals). instance="" leaves the normal single-box path untouched.
+        scope = f"{chall.thread_id}{instance}"
+        if instance:
+            self._seed_racer_workdir(
+                os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id))),
+                os.path.abspath(os.path.join(config.DOWNLOAD_DIR, scope)),
+            )
+
         if kind == "agent":
             # Absolute: a relative workdir is a docker bind-mount footgun (the
             # daemon resolves -v against ITS cwd, not the bot's).
-            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
+            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, scope))
             # Role drives which skills/roles/<role>.md doctrine loads. Thin-
             # triage-always by default; a specialist-mode lane (deep_solver,
             # windows) gets the deep-solver doctrine instead. Escalation / !lane
@@ -148,8 +193,8 @@ class Dispatcher:
                 # The ONE shared box for this challenge: created on the first worker,
                 # REUSED (not recreated) by every later worker on handoff (#12).
                 sandbox = self.registry.get_box(
-                    chall.thread_id,
-                    lambda: self._build_box(chall, lane, docker_sock=docker_sock),
+                    scope,
+                    lambda: self._build_box(chall, lane, docker_sock=docker_sock, instance=instance),
                 )
             # Web tools (provider-agnostic): DDG default / Serper keyed search +
             # Jina extraction. None searcher (provider="none") -> tool withheld.
@@ -185,7 +230,7 @@ class Dispatcher:
             from .harness import TmuxHarness
             from .harness_worker import HarnessWorker
 
-            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
+            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, scope))
             which = (cli or config.HARNESS_CLI).lower()
             launch = config.CODEX_CLI_CMD if which == "codex" else config.CLAUDE_CLI_CMD
             keys_csv = config.CODEX_STARTUP_KEYS if which == "codex" else config.CLAUDE_STARTUP_KEYS
@@ -197,8 +242,8 @@ class Dispatcher:
             # exec), so we always take the shared box - reusing whatever a prior
             # triage/agent built (with its creds + socket), or creating it now (#12).
             sandbox = self.registry.get_box(
-                chall.thread_id,
-                lambda: self._build_box(chall, lane, docker_sock=docker_sock),
+                scope,
+                lambda: self._build_box(chall, lane, docker_sock=docker_sock, instance=instance),
             )
             session = TmuxHarness(
                 which, sandbox, workdir,
@@ -234,15 +279,17 @@ class Dispatcher:
             from .cc_worker import CCWorker
             from .headless import HeadlessClaude
 
-            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, str(chall.thread_id)))
+            workdir = os.path.abspath(os.path.join(config.DOWNLOAD_DIR, scope))
             role = role_override or (
                 "specialist" if lane.default_mode == "specialist" else "triage"
             )
             sandbox = self.registry.get_box(
-                chall.thread_id,
-                lambda: self._build_box(chall, lane, docker_sock=docker_sock),
+                scope,
+                lambda: self._build_box(chall, lane, docker_sock=docker_sock, instance=instance),
             )
-            tier = config.cc_tier_for(role, lane.name)
+            # tier_override forces a brain (e.g. "deep"=Opus) even on a category lane like
+            # pwn, so `!escalate deep pwn` runs the pwn playbook on Opus, not deepseek-pro.
+            tier = tier_override or config.cc_tier_for(role, lane.name)
             env_profile, secret_env = config.cc_profile(tier)
             if model_override:  # e.g. !escalate deep 4.6 pins the deep tier's Opus version
                 env_profile = {**env_profile, "ANTHROPIC_MODEL": model_override}

@@ -92,6 +92,11 @@ else
   SECOPT="--cap-add SYS_PTRACE --ulimit core=-1 --security-opt seccomp=unconfined --security-opt apparmor=unconfined"
 fi
 
+# expose the host GPU (CUDA torch) - opt in with CDDC_GPU=1. Needs the NVIDIA driver +
+# container toolkit (Docker Desktop bundles it on WSL2); the flag errors without them.
+GPUARG=""
+[ "${CDDC_GPU:-0}" = "1" ] && GPUARG="--gpus all"
+
 # --- backend env: claude on DeepSeek (optional) -----------------------------
 # Secret rides in the spawn env (inherited -e, off the argv); non-secret on argv.
 ENVARGS=""
@@ -113,7 +118,7 @@ fi
 # --- launch the box (sleeps; we exec the CLI into it) -----------------------
 docker rm -f "$BOX" >/dev/null 2>&1 || true
 # shellcheck disable=SC2086
-docker run -d --name "$BOX" $NETARG $MOUNTS $SOCKARG $SECOPT "$IMAGE" sleep infinity >/dev/null
+docker run -d --name "$BOX" $NETARG $MOUNTS $SOCKARG $SECOPT $GPUARG "$IMAGE" sleep infinity >/dev/null
 
 cleanup() {
   if [ "${KEEP:-0}" = "1" ]; then

@@ -50,6 +50,7 @@ class Sandbox:
         decompiler_url: str = "",
         seccomp: str = "unconfined",
         privileged: bool = False,
+        instance: str = "",
     ) -> None:
         self.image = image
         self.thread_id = thread_id
@@ -84,9 +85,12 @@ class Sandbox:
         # scope them by the COMPOSE_PROJECT_NAME / label below. Gated to non-triage
         # roles by the dispatcher - mounting the socket is host-root, not casual.
         self.docker_sock = docker_sock
-        self.name = f"cddc-{thread_id}"
+        # `instance` (e.g. "-r2") makes a race fan-out's boxes distinct: each racer gets
+        # its OWN container + compose scope. CDDC_THREAD and the cddc.thread label stay the
+        # bare thread (below), so all racers' sibling services reap together at the end.
+        self.name = f"cddc-{thread_id}{instance}"
         # Label/compose scope for sibling containers the agent spins via the socket.
-        self.scope = f"cddc-{thread_id}"
+        self.scope = f"cddc-{thread_id}{instance}"
         self._started = False
         # Serialize concurrent start() calls: a race fan-out hands the SAME box
         # object to N workers that each call start() at once - only one should

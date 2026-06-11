@@ -579,10 +579,14 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
     """Approve a pending escalation: stand the triage agent down and respawn a
     specialist (deeper budget), seeded with triage's handoff.
 
-      !escalate              - specialist on the SAME lane
-      !escalate deep [4.6|4.8] - deep_solver lane (Claude/Opus); pick the Opus version
-                                 (4.6 fallback if 4.8 refuses on cyber grounds)
-      !escalate race [n]     - fan out N specialists on the same lane (default 3)
+      !escalate                  - specialist on the SAME lane
+      !escalate <lane>           - RE-SCOPE: specialist on <lane> (e.g. rev triage IDs
+                                   it's really pwn -> hand findings to a pwn specialist)
+      !escalate deep [<lane>] [4.6|4.8]
+                                 - deep (Claude/Opus) on <lane>'s playbook if given, else
+                                   the deep_solver lane; pick the Opus version (4.6
+                                   fallback if 4.8 refuses on cyber grounds)
+      !escalate race [<lane>] [n] - fan out N specialists (on <lane> if given; default 3)
     """
     workers = registry.workers(ctx.channel.id)
     if not workers:
@@ -595,20 +599,36 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
         )
         return
 
-    parts = arg.split()
-    mode = parts[0].lower() if parts else ""
-    lane_override: str | None = None
+    # grammar: !escalate [deep|race] [<lane>] [4.6|4.8 (deep) | <n> (race)]
+    # A <lane> RE-SCOPES the challenge (e.g. rev triage IDs it's really pwn -> hand the
+    # findings to a pwn specialist); deep + <lane> runs that lane's playbook on Opus.
+    toks = arg.split()
+    mode = ""
+    if toks and toks[0].lower() in ("deep", "race"):
+        mode, toks = toks[0].lower(), toks[1:]
+    lane_arg: str | None = None
     deep_model = ""
     n = 1
-    if mode == "deep":
-        lane_override = "deep_solver"
-        deep_model = _deep_model_for(parts[1] if len(parts) > 1 else "")
-    elif mode == "race":
-        n = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 3
-        n = max(2, min(n, 5))
-    elif mode:
-        await ctx.send("usage: !escalate | !escalate deep [4.6|4.8] | !escalate race [n]")
-        return
+    for t in toks:
+        tl = t.lower()
+        if tl in LANES:
+            lane_arg = tl
+        elif mode == "race" and tl.isdigit():
+            n = max(2, min(int(tl), 5))
+        elif mode == "deep" and _deep_model_for(t):
+            deep_model = _deep_model_for(t)
+        else:
+            await ctx.send(
+                "usage: `!escalate [deep|race] [<lane>] [4.6|4.8|<n>]`  "
+                f"(lanes: {', '.join(sorted(LANES))})"
+            )
+            return
+    if mode == "race" and n == 1:
+        n = 3
+    # deep with no explicit lane -> the deep_solver lane; otherwise honour the target lane.
+    lane_override = (lane_arg or "deep_solver") if mode == "deep" else lane_arg
+    # deep forces the deep (Opus) brain even on a category lane like pwn.
+    tier_override = "deep" if mode == "deep" else ""
 
     # Persist a handoff DOSSIER on the (now persistent) box's workdir so the brain
     # taking over inherits what was tried - not a blank slate in a warm box (#11).
@@ -634,7 +654,10 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
         registry.remove(ctx.channel.id, w)
 
     spawned = []
-    for _ in range(n):
+    for i in range(n):
+        # racers get isolated boxes/workdirs (cddc-<thread>-r<i>); a solo escalation keeps
+        # the shared box (instance="").
+        instance = f"-r{i + 1}" if n > 1 else ""
         new_chall = dataclasses.replace(ch, state="dispatched", steers=list(ch.steers))
         worker = await dispatcher.dispatch(
             new_chall, channel,
@@ -644,18 +667,22 @@ async def cmd_escalate(ctx: commands.Context, *, arg: str = "") -> None:
             role_override="specialist",
             budget_mult=ESCALATION_BUDGET_MULT,
             model_override=deep_model,  # !escalate deep 4.6|4.8 pins the cc deep tier's Opus
+            tier_override=tier_override,  # deep brain even when re-laned to a category lane
+            instance=instance,  # race: isolated per-racer box + workdir
         )
         worker.steer(handoff)
         if n > 1:
             worker.race_now()
         spawned.append(worker.name)
 
+    lane_tag = f" -> `{lane_arg}` lane" if lane_arg else ""
     if mode == "deep":
-        label = f"deep (Claude, {deep_model or 'plan default'})" if esc_kind == "cc" else f"deep ({esc_kind})"
+        brain = f"Claude, {deep_model or 'plan default'}" if esc_kind == "cc" else esc_kind
+        label = f"deep ({brain}){lane_tag}"
     elif n > 1:
-        label = f"{n}-way race"
+        label = f"{n}-way race{lane_tag}"
     else:
-        label = "specialist"
+        label = f"specialist{lane_tag}"
     await ctx.send(
         f"escalated -> **{label}**: {', '.join(spawned)} "
         f"(handed off via dossier: difficulty {ch.difficulty}/5, {ch.technique or '?'})"
@@ -830,6 +857,8 @@ async def cmd_help(ctx: commands.Context) -> None:
     lines = [
         "**CDDC bot commands** (run inside a challenge thread):",
         "`!start <desc>` + attachments - begin a challenge here (downloads files)",
+        "`!fetch <url> [name]` - pull a BIG file (too large to attach) into /challenge; "
+        "upload to litterbox/temp.sh/x0.at first (or `sh sandbox/share.sh <file>`)",
         "`!status` - snapshot every agent on this thread",
         "`!trace [@name]` - dump an agent's full message+tool trace as a file",
         "`!files` - list+upload agent files (`!files list` = list only; "
@@ -847,9 +876,11 @@ async def cmd_help(ctx: commands.Context) -> None:
         "`!continue <why it's wrong>` - reject it; reason is folded in, agents re-open",
         "",
         "**when an agent asks to escalate** (it hit something too hard):",
-        "`!escalate` - respawn a specialist on the same lane (deeper budget)",
-        "`!escalate deep` - hand it to the deep_solver lane",
-        "`!escalate race [n]` - fan out N specialists (default 3)",
+        "`!escalate [<lane>]` - respawn a specialist; a <lane> RE-SCOPES it (e.g. rev "
+        "triage IDs pwn -> pwn specialist), handing over the triage findings",
+        "`!escalate deep [<lane>] [4.6|4.8]` - Claude/Opus on <lane>'s playbook (else "
+        "deep_solver); 4.6 falls back if 4.8 refuses on cyber grounds",
+        "`!escalate race [<lane>] [n]` - fan out N ISOLATED racers (default 3); first flag wins",
         "`!deny` - refuse; the agent keeps going as triage",
         "",
         f"lanes: {', '.join(sorted(LANES))}",
